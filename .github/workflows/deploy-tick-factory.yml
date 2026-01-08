@@ -15,7 +15,6 @@ on:
 jobs:
   deploy-dev:
     runs-on: ubuntu-latest
-    environment: development
     
     steps:
       - name: Checkout repo
