@@ -831,34 +831,34 @@ function buildAggsRangeUrl(
   const base = endpoint.base_url.replace(/\/+$/, "");
   
   // DEBUG: Log before and after each replacement
-  console.log("=== buildAggsRangeUrl DEBUG ===");
-  console.log("Input template:", endpoint.path_template);
-  console.log("Input values:", { providerTicker, mult, unit, fromDate, toDate });
+  //console.log("=== buildAggsRangeUrl DEBUG ===");
+  //console.log("Input template:", endpoint.path_template);
+  //console.log("Input values:", { providerTicker, mult, unit, fromDate, toDate });
   
   let path = endpoint.path_template;
-  console.log("Step 0 - Original:", path);
+  //console.log("Step 0 - Original:", path);
   
   path = path.replace("{ticker}", encodeURIComponent(providerTicker));
-  console.log("Step 1 - After {ticker}:", path);
+  //console.log("Step 1 - After {ticker}:", path);
   
   path = path.replace("{multiplier}", String(mult));
-  console.log("Step 2 - After {multiplier}:", path);
+  //console.log("Step 2 - After {multiplier}:", path);
   
   path = path.replace("{mult}", String(mult));
-  console.log("Step 3 - After {mult}:", path);
+  //console.log("Step 3 - After {mult}:", path);
   
   path = path.replace("{timespan}", unit);
-  console.log("Step 4 - After {timespan}:", path);
+  //console.log("Step 4 - After {timespan}:", path);
   
   path = path.replace("{unit}", unit);
-  console.log("Step 5 - After {unit}:", path);
+  //console.log("Step 5 - After {unit}:", path);
   
   path = path.replace("{from}", fromDate);
-  console.log("Step 6 - After {from}:", path);
+  //console.log("Step 6 - After {from}:", path);
   
   path = path.replace("{to}", toDate);
-  console.log("Step 7 - After {to}:", path);
-  console.log("=== END DEBUG ===");
+  //console.log("Step 7 - After {to}:", path);
+  //console.log("=== END DEBUG ===");
 
   // Defensive: ensure all placeholders were replaced
   const unreplaced = path.match(/\{[a-zA-Z_]+\}/g);
