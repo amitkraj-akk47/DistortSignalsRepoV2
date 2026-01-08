@@ -53,7 +53,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          pnpm wrangler deploy --env dev
+          npx wrangler deploy --env dev
 
       - name: Configure Worker Secrets (DEV)
         working-directory: apps/typescript/tick-factory
@@ -61,10 +61,10 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          echo "${{ secrets.MASSIVE_KEY }}" | pnpm wrangler secret put MASSIVE_KEY --env dev
-          echo "${{ secrets.SUPABASE_URL }}" | pnpm wrangler secret put SUPABASE_URL --env dev
-          echo "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" | pnpm wrangler secret put SUPABASE_SERVICE_ROLE_KEY --env dev
-          echo "${{ secrets.INTERNAL_API_KEY }}" | pnpm wrangler secret put INTERNAL_API_KEY --env dev
+          echo "${{ secrets.MASSIVE_KEY }}" | npx wrangler secret put MASSIVE_KEY --env dev
+          echo "${{ secrets.SUPABASE_URL }}" | npx wrangler secret put SUPABASE_URL --env dev
+          echo "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" | npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY --env dev
+          echo "${{ secrets.INTERNAL_API_KEY }}" | npx wrangler secret put INTERNAL_API_KEY --env dev
 
       - name: Deployment summary
         run: |

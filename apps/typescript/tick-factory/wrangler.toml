@@ -19,6 +19,7 @@ ALLOWED_PROVIDER_HOSTS = "api.massive.com"
 [env.dev]
 name = "tick-factory-dev"
 triggers = { crons = ["*/3 * * * *"] }
+vars = { }  # Inherits from top-level [vars]
 
 [env.test]
 name = "tick-factory-test"
