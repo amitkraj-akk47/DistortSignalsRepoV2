@@ -1,0 +1,64 @@
+{
+  "error_classes": {
+    "VALIDATION_ERROR": {
+      "code": "VAL",
+      "http_status": 400,
+      "description": "Input validation failed"
+    },
+    "AUTHENTICATION_ERROR": {
+      "code": "AUTH",
+      "http_status": 401,
+      "description": "Authentication required or failed"
+    },
+    "AUTHORIZATION_ERROR": {
+      "code": "AUTHZ",
+      "http_status": 403,
+      "description": "Insufficient permissions"
+    },
+    "NOT_FOUND_ERROR": {
+      "code": "NOTFOUND",
+      "http_status": 404,
+      "description": "Resource not found"
+    },
+    "CONFLICT_ERROR": {
+      "code": "CONFLICT",
+      "http_status": 409,
+      "description": "Resource conflict (duplicate, etc.)"
+    },
+    "RATE_LIMIT_ERROR": {
+      "code": "RATELIMIT",
+      "http_status": 429,
+      "description": "Too many requests"
+    },
+    "INTERNAL_ERROR": {
+      "code": "INTERNAL",
+      "http_status": 500,
+      "description": "Unexpected server error"
+    },
+    "SERVICE_UNAVAILABLE": {
+      "code": "UNAVAIL",
+      "http_status": 503,
+      "description": "Service temporarily unavailable"
+    },
+    "CIRCUIT_OPEN": {
+      "code": "CIRCUIT",
+      "http_status": 503,
+      "description": "Circuit breaker is open"
+    },
+    "TIMEOUT_ERROR": {
+      "code": "TIMEOUT",
+      "http_status": 504,
+      "description": "Request timeout"
+    },
+    "BROKER_ERROR": {
+      "code": "BROKER",
+      "http_status": 502,
+      "description": "MT5 broker error"
+    },
+    "DATABASE_ERROR": {
+      "code": "DB",
+      "http_status": 500,
+      "description": "Database operation failed"
+    }
+  }
+}

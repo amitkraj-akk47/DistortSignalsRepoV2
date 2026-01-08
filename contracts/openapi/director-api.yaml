@@ -1,0 +1,177 @@
+openapi: 3.0.3
+info:
+  title: DistortSignals Director API
+  description: Admin interface for Trade Director service
+  version: 1.0.0
+  contact:
+    name: DistortSignals Team
+    email: support@distortsignals.com
+
+servers:
+  - url: https://director.distortsignals.com/api/v1
+    description: Production
+  - url: http://localhost:8787/api/v1
+    description: Local development
+
+security:
+  - BearerAuth: []
+
+paths:
+  /directives:
+    get:
+      summary: List trade directives
+      tags: [Directives]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, completed, failed, cancelled]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+      responses:
+        '200':
+          description: List of directives
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TradeDirective'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+
+  /directives/{directiveId}:
+    get:
+      summary: Get directive details
+      tags: [Directives]
+      parameters:
+        - name: directiveId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Directive details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradeDirective'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /directives/{directiveId}/cancel:
+    post:
+      summary: Cancel a pending directive
+      tags: [Directives]
+      parameters:
+        - name: directiveId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: Directive cancelled
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /health:
+    get:
+      summary: Health check
+      tags: [System]
+      security: []
+      responses:
+        '200':
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [healthy, degraded]
+                  timestamp:
+                    type: string
+                    format: date-time
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    TradeDirective:
+      type: object
+      properties:
+        directive_id:
+          type: string
+          format: uuid
+        signal_id:
+          type: string
+          format: uuid
+        action:
+          type: string
+          enum: [OPEN_LONG, OPEN_SHORT, CLOSE_POSITION]
+        symbol:
+          type: string
+        volume:
+          type: number
+        status:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    Pagination:
+      type: object
+      properties:
+        page:
+          type: integer
+        per_page:
+          type: integer
+        total:
+          type: integer
+
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                example: "Resource not found"
+
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string

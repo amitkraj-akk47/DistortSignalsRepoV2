@@ -1,0 +1,29 @@
+{
+  "name": "@distortsignals/ts-contracts",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Type-safe contract interfaces for DistortSignals",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./schemas": "./src/schemas.ts",
+    "./types": "./src/types.ts",
+    "./validators": "./src/validators.ts"
+  },
+  "scripts": {
+    "build": "tsc",
+    "generate": "node scripts/generate-types.js",
+    "lint": "eslint src/**/*.ts",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "@distortsignals/ts-core": "workspace:*",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "eslint": "^8.55.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.0.0"
+  }
+}

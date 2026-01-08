@@ -1,0 +1,84 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://distortsignals.com/schemas/execution_event.schema.json",
+  "title": "Execution Event",
+  "description": "Result of trade execution from execution-officer (MT5 EA)",
+  "type": "object",
+  "required": [
+    "event_id",
+    "directive_id",
+    "status",
+    "created_at"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this event"
+    },
+    "directive_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Reference to directive that was executed"
+    },
+    "mt5_ticket": {
+      "type": "integer",
+      "description": "MT5 order ticket number"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["success", "failed", "rejected", "partial"],
+      "description": "Execution result"
+    },
+    "executed_price": {
+      "type": "number",
+      "description": "Actual execution price"
+    },
+    "executed_volume": {
+      "type": "number",
+      "description": "Actual executed volume"
+    },
+    "slippage_pips": {
+      "type": "number",
+      "description": "Actual slippage experienced"
+    },
+    "commission": {
+      "type": "number",
+      "description": "Trading commission charged"
+    },
+    "swap": {
+      "type": "number",
+      "description": "Swap/rollover charge"
+    },
+    "error_code": {
+      "type": "integer",
+      "description": "MT5 error code if execution failed"
+    },
+    "error_message": {
+      "type": "string",
+      "description": "Human-readable error description"
+    },
+    "retry_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of retry attempts made"
+    },
+    "execution_time_ms": {
+      "type": "integer",
+      "description": "Time taken to execute in milliseconds"
+    },
+    "broker_response": {
+      "type": "object",
+      "description": "Raw broker response data"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp"
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Additional context"
+    }
+  }
+}

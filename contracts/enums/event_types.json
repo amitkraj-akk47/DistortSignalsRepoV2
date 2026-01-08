@@ -1,0 +1,17 @@
+{
+  "event_types": {
+    "SIGNAL_GENERATED": "New trading signal created",
+    "SIGNAL_PROCESSED": "Signal processed by trade director",
+    "DIRECTIVE_CREATED": "Trade directive issued",
+    "DIRECTIVE_ACKNOWLEDGED": "Directive picked up by execution officer",
+    "DIRECTIVE_COMPLETED": "Directive successfully executed",
+    "DIRECTIVE_FAILED": "Directive execution failed",
+    "DIRECTIVE_CANCELLED": "Directive cancelled by user",
+    "EXECUTION_SUCCESS": "Trade executed successfully",
+    "EXECUTION_FAILED": "Trade execution failed",
+    "POSITION_OPENED": "New position opened",
+    "POSITION_CLOSED": "Position closed",
+    "STOP_LOSS_HIT": "Stop loss triggered",
+    "TAKE_PROFIT_HIT": "Take profit triggered"
+  }
+}

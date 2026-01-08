@@ -1,0 +1,19 @@
+{
+  "name": "@distortsignals/public-api",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "dependencies": {
+    "@distortsignals/ts-core": "workspace:*",
+    "@distortsignals/ts-contracts": "workspace:*",
+    "@distortsignals/ts-supabase": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20231218.0",
+    "wrangler": "^3.22.0"
+  }
+}

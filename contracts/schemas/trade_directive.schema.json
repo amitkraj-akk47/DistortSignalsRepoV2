@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://distortsignals.com/schemas/trade_directive.schema.json",
+  "title": "Trade Directive",
+  "description": "Command from trade-director to execution-officer",
+  "type": "object",
+  "required": [
+    "directive_id",
+    "signal_id",
+    "action",
+    "symbol",
+    "volume",
+    "status",
+    "created_at"
+  ],
+  "properties": {
+    "directive_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this directive"
+    },
+    "signal_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Reference to originating signal"
+    },
+    "action": {
+      "type": "string",
+      "enum": ["OPEN_LONG", "OPEN_SHORT", "CLOSE_POSITION", "MODIFY_SL", "MODIFY_TP"],
+      "description": "Action to execute"
+    },
+    "symbol": {
+      "type": "string",
+      "pattern": "^[A-Z]{6}$",
+      "description": "Currency pair",
+      "examples": ["EURUSD", "GBPJPY"]
+    },
+    "volume": {
+      "type": "number",
+      "minimum": 0.01,
+      "description": "Trade volume in lots"
+    },
+    "price_limit": {
+      "type": "number",
+      "description": "Limit price for pending orders"
+    },
+    "stop_loss": {
+      "type": "number",
+      "description": "Stop loss price"
+    },
+    "take_profit": {
+      "type": "number",
+      "description": "Take profit price"
+    },
+    "slippage_pips": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 50,
+      "description": "Maximum acceptable slippage"
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "minimum": 30,
+      "maximum": 300,
+      "description": "How long before directive expires"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pending", "acknowledged", "completed", "failed", "cancelled", "expired"],
+      "description": "Execution status"
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["low", "normal", "high", "urgent"],
+      "default": "normal",
+      "description": "Execution priority"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp"
+    },
+    "acknowledged_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When execution-officer picked up the directive"
+    },
+    "completed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When execution finished"
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Additional context"
+    }
+  }
+}

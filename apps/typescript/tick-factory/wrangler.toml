@@ -1,0 +1,32 @@
+name = "tick-factory"
+main = "src/index.ts"
+compatibility_date = "2026-01-08"account_id = "513f37da8020ee565269c199ff8bb52f"
+# cron trigger (example: every 3 minutes)
+triggers = { crons = ["*/3 * * * *"] }
+
+[vars]
+JOB_NAME = "tick_factory_ingest_massive_ab"
+MAX_ASSETS_PER_RUN = "200"
+REQUEST_TIMEOUT_MS = "30000"
+LOCK_LEASE_SECONDS = "150"
+ASSET_ACTIVE_FIELD = "active"
+MAX_RUN_BUDGET_MS = "85000"
+HARD_DISABLE_STREAK = "2"
+FETCH_COOLDOWN_SECONDS = "120"
+ALLOWED_PROVIDER_HOSTS = "api.massive.com"
+
+[env.dev]
+name = "tick-factory-dev"
+triggers = { crons = ["*/3 * * * *"] }
+
+[env.test]
+name = "tick-factory-test"
+triggers = { crons = ["*/3 * * * *"] }
+
+[env.stage]
+name = "tick-factory-stage"
+triggers = { crons = ["*/3 * * * *"] }
+
+[env.prod]
+name = "tick-factory-prod"
+triggers = { crons = ["*/3 * * * *"] }

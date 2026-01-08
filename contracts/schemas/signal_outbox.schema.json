@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://distortsignals.com/schemas/signal_outbox.schema.json",
+  "title": "Signal Outbox",
+  "description": "Trading signal published by signal-generator",
+  "type": "object",
+  "required": [
+    "signal_id",
+    "symbol",
+    "signal_type",
+    "timeframe",
+    "strength",
+    "created_at",
+    "status"
+  ],
+  "properties": {
+    "signal_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this signal"
+    },
+    "symbol": {
+      "type": "string",
+      "pattern": "^[A-Z]{6}$",
+      "description": "Currency pair (e.g., EURUSD, GBPJPY)",
+      "examples": ["EURUSD", "GBPJPY"]
+    },
+    "signal_type": {
+      "type": "string",
+      "enum": ["BUY", "SELL", "CLOSE"],
+      "description": "Type of trading signal"
+    },
+    "timeframe": {
+      "type": "string",
+      "enum": ["M1", "M5", "M15", "M30", "H1", "H4", "D1"],
+      "description": "Chart timeframe for the signal"
+    },
+    "strength": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Signal strength/confidence (0-100)"
+    },
+    "indicators": {
+      "type": "object",
+      "description": "Technical indicator values that generated the signal",
+      "properties": {
+        "rsi": {"type": "number"},
+        "macd": {"type": "number"},
+        "ema_20": {"type": "number"},
+        "ema_50": {"type": "number"}
+      }
+    },
+    "price_at_signal": {
+      "type": "number",
+      "description": "Market price when signal was generated"
+    },
+    "stop_loss": {
+      "type": "number",
+      "description": "Suggested stop loss price"
+    },
+    "take_profit": {
+      "type": "number",
+      "description": "Suggested take profit price"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pending", "processed", "archived", "cancelled"],
+      "description": "Processing status of the signal"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp"
+    },
+    "processed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When trade-director processed this signal"
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Additional contextual information"
+    }
+  }
+}

@@ -1,0 +1,113 @@
+openapi: 3.0.3
+info:
+  title: DistortSignals Public API
+  description: Read-only API for viewing trading signals
+  version: 1.0.0
+
+servers:
+  - url: https://api.distortsignals.com/v1
+    description: Production
+  - url: http://localhost:8788/v1
+    description: Local development
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /signals:
+    get:
+      summary: List recent signals
+      tags: [Signals]
+      parameters:
+        - name: symbol
+          in: query
+          schema:
+            type: string
+            pattern: ^[A-Z]{6}$
+        - name: timeframe
+          in: query
+          schema:
+            type: string
+            enum: [M1, M5, M15, M30, H1, H4, D1]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        '200':
+          description: List of signals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Signal'
+
+  /signals/{signalId}:
+    get:
+      summary: Get signal details
+      tags: [Signals]
+      parameters:
+        - name: signalId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Signal details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Signal'
+
+  /symbols:
+    get:
+      summary: List available trading symbols
+      tags: [Reference]
+      security: []
+      responses:
+        '200':
+          description: List of symbols
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  symbols:
+                    type: array
+                    items:
+                      type: string
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  schemas:
+    Signal:
+      type: object
+      properties:
+        signal_id:
+          type: string
+          format: uuid
+        symbol:
+          type: string
+        signal_type:
+          type: string
+          enum: [BUY, SELL, CLOSE]
+        timeframe:
+          type: string
+        strength:
+          type: number
+        created_at:
+          type: string
+          format: date-time
