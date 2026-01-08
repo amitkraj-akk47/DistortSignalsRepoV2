@@ -1,0 +1,73 @@
+name: Deploy Tick Factory Worker
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/typescript/tick-factory/**"
+      - "packages/ts-core/**"
+      - "packages/ts-contracts/**"
+      - "packages/ts-supabase/**"
+      - ".github/workflows/deploy-tick-factory.yml"
+  workflow_dispatch: # Allow manual triggering
+
+jobs:
+  deploy-dev:
+    runs-on: ubuntu-latest
+    environment: development
+    
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 8
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Deploy to Cloudflare Workers (DEV)
+        working-directory: apps/typescript/tick-factory
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          pnpm wrangler deploy --env dev
+
+      - name: Configure Worker Secrets (DEV)
+        working-directory: apps/typescript/tick-factory
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          echo "${{ secrets.MASSIVE_KEY }}" | pnpm wrangler secret put MASSIVE_KEY --env dev
+          echo "${{ secrets.SUPABASE_URL }}" | pnpm wrangler secret put SUPABASE_URL --env dev
+          echo "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" | pnpm wrangler secret put SUPABASE_SERVICE_ROLE_KEY --env dev
+          echo "${{ secrets.INTERNAL_API_KEY }}" | pnpm wrangler secret put INTERNAL_API_KEY --env dev
+
+      - name: Deployment summary
+        run: |
+          echo "✅ Tick Factory Worker deployed to DEV environment"
+          echo "Worker Name: tick-factory-dev"
+          echo "Account ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"

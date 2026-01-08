@@ -1,6 +1,7 @@
 name = "tick-factory"
-main = "src/index.ts"
-compatibility_date = "2026-01-08"account_id = "513f37da8020ee565269c199ff8bb52f"
+main = "src/ingestindex.ts"
+compatibility_date = "2026-01-08"
+account_id = "513f37da8020ee565269c199ff8bb52f"
 # cron trigger (example: every 3 minutes)
 triggers = { crons = ["*/3 * * * *"] }
 
