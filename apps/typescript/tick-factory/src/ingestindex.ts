@@ -829,14 +829,36 @@ function buildAggsRangeUrl(
   mergedParams: Json
 ): string {
   const base = endpoint.base_url.replace(/\/+$/, "");
-  const path = endpoint.path_template
-    .replace("{ticker}", encodeURIComponent(providerTicker))
-    .replace("{multiplier}", String(mult))
-    .replace("{mult}", String(mult))
-    .replace("{timespan}", unit)
-    .replace("{unit}", unit)
-    .replace("{from}", fromDate)
-    .replace("{to}", toDate);
+  
+  // DEBUG: Log before and after each replacement
+  console.log("=== buildAggsRangeUrl DEBUG ===");
+  console.log("Input template:", endpoint.path_template);
+  console.log("Input values:", { providerTicker, mult, unit, fromDate, toDate });
+  
+  let path = endpoint.path_template;
+  console.log("Step 0 - Original:", path);
+  
+  path = path.replace("{ticker}", encodeURIComponent(providerTicker));
+  console.log("Step 1 - After {ticker}:", path);
+  
+  path = path.replace("{multiplier}", String(mult));
+  console.log("Step 2 - After {multiplier}:", path);
+  
+  path = path.replace("{mult}", String(mult));
+  console.log("Step 3 - After {mult}:", path);
+  
+  path = path.replace("{timespan}", unit);
+  console.log("Step 4 - After {timespan}:", path);
+  
+  path = path.replace("{unit}", unit);
+  console.log("Step 5 - After {unit}:", path);
+  
+  path = path.replace("{from}", fromDate);
+  console.log("Step 6 - After {from}:", path);
+  
+  path = path.replace("{to}", toDate);
+  console.log("Step 7 - After {to}:", path);
+  console.log("=== END DEBUG ===");
 
   // Defensive: ensure all placeholders were replaced
   const unreplaced = path.match(/\{[a-zA-Z_]+\}/g);
@@ -1289,8 +1311,26 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
       const mergedParams: Json = { ...(endpoint.default_params || {}), ...(asset.query_params || {}) };
       if (!("limit" in mergedParams)) mergedParams["limit"] = 50000;
 
+      // DEBUG: Log template before URL building
+      log.debug("TEMPLATE_DEBUG", "Path template inspection", {
+        raw_template: endpoint.path_template,
+        template_length: endpoint.path_template.length,
+        has_multiplier: endpoint.path_template.includes("{multiplier}"),
+        has_timespan: endpoint.path_template.includes("{timespan}"),
+        has_ticker: endpoint.path_template.includes("{ticker}"),
+        mult_value: mult,
+        unit_value: "minute",
+        ticker_value: asset.provider_ticker,
+      });
+
       const url = buildAggsRangeUrl(endpoint, asset.provider_ticker, mult, "minute", fromDate, toDate, mergedParams);
       const urlLog = await urlForLogs(env, url);
+      
+      log.debug("URL_BUILT", "Final URL constructed", {
+        url: url,
+        url_length: url.length,
+        has_encoded_braces: url.includes("%7B") || url.includes("%7D"),
+      });
       
       log.info("HTTP_REQUEST", `Fetching bars from provider`, {
         from: fromDate,
