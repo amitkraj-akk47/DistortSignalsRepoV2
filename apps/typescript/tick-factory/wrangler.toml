@@ -8,7 +8,7 @@ account_id = "513f37da8020ee565269c199ff8bb52f"
 
 [env.dev]
 name = "tick-factory-dev"
-triggers = { crons = ["*/3 * * * *"] }
+triggers = { crons = ["*/10 * * * *"] }
 
 [env.dev.vars]
 JOB_NAME = "tick_factory_ingest_massive_ab"
