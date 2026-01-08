@@ -1,28 +1,75 @@
 # Tick Factory Worker
 
-Cloudflare Worker that generates market ticks and time-based signals.
+**Market Data Ingestion Worker** - Production-ready Cloudflare Worker for ingesting market data from Massive API.
+
+## Features
+
+- ✅ Automated market data ingestion from Massive API
+- ✅ Class A (1-minute) and Class B (5-minute) asset support
+- ✅ Structured logging with configurable log levels
+- ✅ Distributed locking for concurrent execution safety
+- ✅ Automatic retry with exponential backoff
+- ✅ Per-asset timing metrics and statistics
+- ✅ Auto-disable assets after consecutive failures
+- ✅ CI/CD deployment via GitHub Actions
 
 ## Purpose
 
-- Receives market data from external sources
-- Generates time-based events (heartbeats)
-- Publishes to Communication Hub
+- Ingests real-time OHLCV market data from Massive API
+- Stores data in Supabase for downstream consumption
+- Runs every 3 minutes via Cloudflare Cron triggers
+- Supports multiple environments (dev, test, stage, prod)
 
 ## Environment Variables
 
+### Required Secrets (set via Cloudflare)
 ```env
-COMMUNICATION_HUB_URL=https://comm-hub.example.com
-API_KEY=your-api-key
+MASSIVE_KEY=your-massive-api-key
+SUPABASE_URL=https://xxx.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+INTERNAL_API_KEY=your-internal-api-key
+```
+
+### Configuration Variables (set in wrangler.toml)
+```env
+JOB_NAME=tick_factory_ingest_massive_ab
+MAX_ASSETS_PER_RUN=200
+REQUEST_TIMEOUT_MS=30000
+LOG_LEVEL=INFO
+PROGRESS_INTERVAL=10
 ```
 
 ## Development
 
 ```bash
+# Install dependencies
+pnpm install
+
+# Run locally
 pnpm dev
+
+# Deploy to dev
+pnpm wrangler deploy --env dev
+
+# Watch live logs
+pnpm wrangler tail --env dev
 ```
 
 ## Deployment
 
+Automated via GitHub Actions on push to `main` branch.
+
+Manual deployment:
 ```bash
-pnpm deploy
+pnpm wrangler deploy --env dev
+```
+
+## Monitoring
+
+View logs in Cloudflare Dashboard:
+https://dash.cloudflare.com/YOUR_ACCOUNT_ID/workers-and-pages
+
+Or tail logs in real-time:
+```bash
+pnpm wrangler tail --env dev
 ```
