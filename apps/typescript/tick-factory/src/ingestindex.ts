@@ -831,6 +831,7 @@ function buildAggsRangeUrl(
   const base = endpoint.base_url.replace(/\/+$/, "");
   const path = endpoint.path_template
     .replace("{ticker}", encodeURIComponent(providerTicker))
+    .replace("{multiplier}", String(mult))
     .replace("{mult}", String(mult))
     .replace("{unit}", unit)
     .replace("{from}", fromDate)
