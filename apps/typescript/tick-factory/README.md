@@ -67,9 +67,13 @@ pnpm wrangler deploy --env dev
 ## Monitoring
 
 View logs in Cloudflare Dashboard:
-https://dash.cloudflare.com/YOUR_ACCOUNT_ID/workers-and-pages
+https://dash.cloudflare.com/513f37da8020ee565269c199ff8bb52f/workers-and-pages
 
 Or tail logs in real-time:
 ```bash
 pnpm wrangler tail --env dev
 ```
+
+## Architecture
+
+This worker ingests market data every 3 minutes via Cloudflare Cron triggers and stores it in Supabase for downstream consumption by trading systems.
