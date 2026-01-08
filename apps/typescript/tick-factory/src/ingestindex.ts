@@ -833,9 +833,16 @@ function buildAggsRangeUrl(
     .replace("{ticker}", encodeURIComponent(providerTicker))
     .replace("{multiplier}", String(mult))
     .replace("{mult}", String(mult))
+    .replace("{timespan}", unit)
     .replace("{unit}", unit)
     .replace("{from}", fromDate)
     .replace("{to}", toDate);
+
+  // Defensive: ensure all placeholders were replaced
+  const unreplaced = path.match(/\{[a-zA-Z_]+\}/g);
+  if (unreplaced) {
+    throw new Error(`URL template placeholders not replaced: ${unreplaced.join(", ")} in path: ${path}`);
+  }
 
   const params = new URLSearchParams();
   for (const [k, v] of Object.entries(mergedParams || {})) {
