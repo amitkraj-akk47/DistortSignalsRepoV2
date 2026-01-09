@@ -1,0 +1,462 @@
+-- ============================================================================
+-- 003_ingest_asset_start_rpc.sql
+-- Atomically ensures ingest state exists, marks running, returns current state.
+-- Security-hardened: security definer + fixed search_path + restricted execute.
+-- ============================================================================
+
+DROP FUNCTION IF EXISTS ingest_asset_start(text, text);
+
+CREATE OR REPLACE FUNCTION ingest_asset_start(
+  p_symbol text,
+  p_tf text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_state jsonb;
+  v_now timestamptz := now();
+BEGIN
+  IF p_symbol IS NULL OR btrim(p_symbol) = '' THEN
+    RAISE EXCEPTION 'p_symbol cannot be null or empty';
+  END IF;
+
+  IF p_tf IS NULL OR p_tf NOT IN ('1m','5m','1h','1d') THEN
+    RAISE EXCEPTION 'p_tf must be one of: 1m, 5m, 1h, 1d';
+  END IF;
+
+  INSERT INTO data_ingest_state (
+    canonical_symbol,
+    timeframe,
+    status,
+    last_run_at_utc,
+    updated_at
+  )
+  VALUES (
+    btrim(p_symbol),
+    p_tf,
+    'running',
+    v_now,
+    v_now
+  )
+  ON CONFLICT (canonical_symbol, timeframe)
+  DO UPDATE SET
+    status = 'running',
+    last_run_at_utc = v_now,
+    updated_at = v_now
+  RETURNING jsonb_build_object(
+    'canonical_symbol', canonical_symbol,
+    'timeframe', timeframe,
+    'last_bar_ts_utc', last_bar_ts_utc,
+    'last_run_at_utc', last_run_at_utc,
+    'status', status,
+    'last_error', last_error,
+    'hard_fail_streak', COALESCE(hard_fail_streak, 0),
+    'last_attempted_to_utc', last_attempted_to_utc,
+    'last_successful_to_utc', last_successful_to_utc,
+    'updated_at', updated_at
+  ) INTO v_state;
+
+  RETURN v_state;
+END;
+$$;
+
+-- Restrict who can execute (very important)
+REVOKE EXECUTE ON FUNCTION ingest_asset_start(text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ingest_asset_start(text, text) TO service_role;
+
+COMMENT ON FUNCTION ingest_asset_start(text, text) IS
+'Atomically ensures ingest state row exists, marks it as running, and returns current state.
+Security: SECURITY DEFINER + fixed search_path + EXECUTE only for service_role.';
+
+
+
+-- ============================================================================
+-- 004_upsert_bars_batch_rpc.sql
+-- Batch upsert bars via single RPC call.
+-- Security-hardened + robust validation + DXY safety rules.
+-- ============================================================================
+
+DROP FUNCTION IF EXISTS upsert_bars_batch(jsonb);
+
+CREATE OR REPLACE FUNCTION upsert_bars_batch(p_bars jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_inserted integer := 0;
+  v_updated  integer := 0;
+  v_total_in integer := 0;
+  v_upserted_total integer := 0;
+
+  v_start_ts timestamptz;
+  v_end_ts   timestamptz;
+
+  v_rejected integer := 0;
+  v_reject_samples jsonb := '[]'::jsonb; -- small sample of rejected rows (capped)
+BEGIN
+  IF p_bars IS NULL OR jsonb_typeof(p_bars) <> 'array' OR jsonb_array_length(p_bars) = 0 THEN
+    RETURN jsonb_build_object(
+      'success', true,
+      'input_count', COALESCE(jsonb_array_length(p_bars), 0),
+      'upserted_total', 0,
+      'inserted', 0,
+      'updated', 0,
+      'rejected', 0,
+      'message', 'No bars provided'
+    );
+  END IF;
+
+  v_total_in := jsonb_array_length(p_bars);
+
+  /*
+    Validation rules enforced BEFORE upsert:
+
+    - canonical_symbol/timeframe/ts_utc must exist
+    - open/high/low/close must be numeric and NOT NULL
+    - high >= low, high >= open/close, low <= open/close
+    - vol must be numeric and >= 0 (null allowed -> default 0)
+    - For DXY: open/high/low/close must be > 0 (prevents downstream calc errors)
+  */
+
+  WITH
+  raw AS (
+    SELECT
+      bar,
+      ordinality AS idx
+    FROM jsonb_array_elements(p_bars) WITH ORDINALITY AS t(bar, ordinality)
+  ),
+  parsed AS (
+    SELECT
+      idx,
+
+      NULLIF(btrim(bar->>'canonical_symbol'), '') AS canonical_symbol,
+      NULLIF(btrim(bar->>'provider_ticker'), '')  AS provider_ticker,
+      NULLIF(btrim(bar->>'timeframe'), '')        AS timeframe,
+
+      (bar->>'ts_utc')::timestamptz               AS ts_utc,
+
+      NULLIF(bar->>'open','')::numeric            AS open,
+      NULLIF(bar->>'high','')::numeric            AS high,
+      NULLIF(bar->>'low','')::numeric             AS low,
+      NULLIF(bar->>'close','')::numeric           AS close,
+
+      NULLIF(bar->>'vol','')::numeric             AS vol,
+      NULLIF(bar->>'vwap','')::numeric            AS vwap,
+      NULLIF(bar->>'trade_count','')::integer     AS trade_count,
+
+      COALESCE(NULLIF(bar->>'is_partial','')::boolean, false) AS is_partial,
+      COALESCE(NULLIF(bar->>'source',''), 'massive')         AS source,
+      COALESCE(NULLIF(bar->>'ingested_at','')::timestamptz, now()) AS ingested_at,
+      COALESCE(bar->'raw', '{}'::jsonb) AS raw_json
+    FROM raw
+  ),
+  validated AS (
+    SELECT
+      p.*,
+      -- DXY detection (adjust if your canonical symbol differs)
+      (upper(p.canonical_symbol) = 'DXY' OR upper(p.canonical_symbol) LIKE '%DXY%') AS is_dxy,
+
+      -- Compute validation error reason (NULL means valid)
+      CASE
+        WHEN p.canonical_symbol IS NULL THEN 'missing_canonical_symbol'
+        WHEN p.timeframe IS NULL THEN 'missing_timeframe'
+        WHEN p.ts_utc IS NULL THEN 'missing_or_bad_ts_utc'
+        WHEN p.open IS NULL OR p.high IS NULL OR p.low IS NULL OR p.close IS NULL THEN 'missing_ohlc'
+        WHEN p.high < p.low THEN 'ohlc_invalid_high_lt_low'
+        WHEN p.high < p.open OR p.high < p.close THEN 'ohlc_invalid_high_lt_open_or_close'
+        WHEN p.low  > p.open OR p.low  > p.close THEN 'ohlc_invalid_low_gt_open_or_close'
+        WHEN p.vol IS NOT NULL AND p.vol < 0 THEN 'vol_negative'
+        WHEN (upper(p.canonical_symbol) = 'DXY' OR upper(p.canonical_symbol) LIKE '%DXY%')
+             AND (p.open <= 0 OR p.high <= 0 OR p.low <= 0 OR p.close <= 0) THEN 'dxy_ohlc_must_be_gt_zero'
+        ELSE NULL
+      END AS reject_reason
+    FROM parsed p
+  ),
+  rejected AS (
+    SELECT *
+    FROM validated
+    WHERE reject_reason IS NOT NULL
+  ),
+  reject_stats AS (
+    SELECT
+      COUNT(*) AS rejected_count,
+      -- keep up to 10 samples for debugging (idx + reason + ts)
+      COALESCE(
+        jsonb_agg(
+          jsonb_build_object(
+            'idx', idx,
+            'canonical_symbol', canonical_symbol,
+            'timeframe', timeframe,
+            'ts_utc', ts_utc,
+            'reason', reject_reason
+          )
+        ) FILTER (WHERE idx IS NOT NULL),
+        '[]'::jsonb
+      ) AS samples_all
+    FROM (
+      SELECT *
+      FROM rejected
+      ORDER BY idx
+      LIMIT 10
+    ) s
+  ),
+  valid AS (
+    SELECT *
+    FROM validated
+    WHERE reject_reason IS NULL
+  ),
+  upsert_result AS (
+    INSERT INTO data_bars (
+      canonical_symbol,
+      provider_ticker,
+      timeframe,
+      ts_utc,
+      open,
+      high,
+      low,
+      close,
+      vol,
+      vwap,
+      trade_count,
+      is_partial,
+      source,
+      ingested_at,
+      raw
+    )
+    SELECT
+      canonical_symbol,
+      provider_ticker,
+      timeframe,
+      ts_utc,
+      open,
+      high,
+      low,
+      close,
+      COALESCE(vol, 0),
+      vwap,
+      trade_count,
+      is_partial,
+      source,
+      ingested_at,
+      raw_json
+    FROM valid
+    ON CONFLICT (canonical_symbol, timeframe, ts_utc)
+    DO UPDATE SET
+      open = EXCLUDED.open,
+      high = EXCLUDED.high,
+      low = EXCLUDED.low,
+      close = EXCLUDED.close,
+      vol = EXCLUDED.vol,
+      vwap = EXCLUDED.vwap,
+      trade_count = EXCLUDED.trade_count,
+      is_partial = EXCLUDED.is_partial,
+      ingested_at = EXCLUDED.ingested_at,
+      raw = EXCLUDED.raw
+    RETURNING
+      ts_utc,
+      (xmax = 0) AS was_inserted
+  )
+  SELECT
+    -- upsert counts
+    COUNT(*) FILTER (WHERE was_inserted),
+    COUNT(*) FILTER (WHERE NOT was_inserted),
+    COUNT(*),
+    MIN(ts_utc),
+    MAX(ts_utc)
+  INTO v_inserted, v_updated, v_upserted_total, v_start_ts, v_end_ts
+  FROM upsert_result;
+
+  SELECT rejected_count, samples_all
+  INTO v_rejected, v_reject_samples
+  FROM reject_stats;
+
+  RETURN jsonb_build_object(
+    'success', true,
+    'input_count', v_total_in,
+    'upserted_total', v_upserted_total,
+    'inserted', v_inserted,
+    'updated', v_updated,
+    'rejected', v_rejected,
+    'rejected_samples', v_reject_samples,
+    'ts_range', CASE
+      WHEN v_upserted_total > 0 THEN jsonb_build_object('start', v_start_ts, 'end', v_end_ts)
+      ELSE NULL
+    END
+  );
+
+EXCEPTION
+  WHEN OTHERS THEN
+    RETURN jsonb_build_object(
+      'success', false,
+      'error', SQLERRM,
+      'error_detail', SQLSTATE,
+      'input_count', COALESCE(v_total_in, 0)
+    );
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION upsert_bars_batch(jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION upsert_bars_batch(jsonb) TO service_role;
+
+COMMENT ON FUNCTION upsert_bars_batch(jsonb) IS
+'Batch upsert bars from JSONB array. Validates OHLC integrity and rejects bad rows (does not crash whole batch).
+DXY safety: rejects rows where OHLC is NULL or <= 0.
+Security: SECURITY DEFINER + fixed search_path + EXECUTE only for service_role.';
+
+-- ============================================================================
+-- 005_ingest_asset_finish_rpc.sql
+-- Finalizes ingest state with correct streak semantics.
+-- Only "hard" failures increment hard_fail_streak.
+-- ============================================================================
+
+DROP FUNCTION IF EXISTS ingest_asset_finish(text, text, boolean, text, text, timestamptz, timestamptz, integer);
+
+CREATE OR REPLACE FUNCTION ingest_asset_finish(
+  p_symbol text,
+  p_tf text,
+  p_success boolean,
+  p_fail_kind text DEFAULT NULL,       -- 'hard' | 'transient' | 'soft' (only used when p_success=false)
+  p_error text DEFAULT NULL,
+  p_new_cursor timestamptz DEFAULT NULL,     -- set on success when you advanced
+  p_successful_to timestamptz DEFAULT NULL,  -- set on success (safeTo)
+  p_attempted_to timestamptz DEFAULT NULL,   -- set on failure (attempt window end)
+  p_hard_disable_threshold integer DEFAULT 2
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_now timestamptz := now();
+  v_current_streak integer := 0;
+  v_new_streak integer := 0;
+  v_new_status text;
+  v_was_disabled boolean := false;
+
+  v_exists boolean := false;
+  v_state jsonb;
+BEGIN
+  IF p_symbol IS NULL OR btrim(p_symbol) = '' THEN
+    RAISE EXCEPTION 'p_symbol cannot be null or empty';
+  END IF;
+
+  IF p_tf IS NULL OR p_tf NOT IN ('1m','5m','1h','1d') THEN
+    RAISE EXCEPTION 'p_tf must be one of: 1m, 5m, 1h, 1d';
+  END IF;
+
+  IF p_hard_disable_threshold IS NULL OR p_hard_disable_threshold < 1 THEN
+    RAISE EXCEPTION 'p_hard_disable_threshold must be >= 1';
+  END IF;
+
+  -- Ensure the row exists (do not silently return NULL)
+  SELECT TRUE INTO v_exists
+  FROM data_ingest_state
+  WHERE canonical_symbol = btrim(p_symbol) AND timeframe = p_tf;
+
+  IF NOT v_exists THEN
+    -- if you prefer auto-create here, you can INSERT instead of raising.
+    RAISE EXCEPTION 'ingest state row missing for %, %', btrim(p_symbol), p_tf;
+  END IF;
+
+  SELECT COALESCE(hard_fail_streak, 0)
+  INTO v_current_streak
+  FROM data_ingest_state
+  WHERE canonical_symbol = btrim(p_symbol) AND timeframe = p_tf;
+
+  IF p_success THEN
+    -- Success: reset streak
+    v_new_streak := 0;
+    v_new_status := 'ok';
+
+    UPDATE data_ingest_state
+    SET
+      status = 'ok',
+      last_error = NULL,
+      hard_fail_streak = 0,
+      last_bar_ts_utc = COALESCE(p_new_cursor, last_bar_ts_utc),
+      last_successful_to_utc = COALESCE(p_successful_to, last_successful_to_utc),
+      updated_at = v_now
+    WHERE canonical_symbol = btrim(p_symbol) AND timeframe = p_tf
+    RETURNING jsonb_build_object(
+      'canonical_symbol', canonical_symbol,
+      'timeframe', timeframe,
+      'status', status,
+      'last_bar_ts_utc', last_bar_ts_utc,
+      'last_successful_to_utc', last_successful_to_utc,
+      'hard_fail_streak', hard_fail_streak
+    ) INTO v_state;
+
+    RETURN v_state || jsonb_build_object(
+      'success', true,
+      'was_disabled', false,
+      'previous_streak', v_current_streak,
+      'new_streak', v_new_streak
+    );
+
+  ELSE
+    -- Failure: decide whether to increment streak based on p_fail_kind
+    IF p_fail_kind IS NULL THEN
+      p_fail_kind := 'transient';
+    END IF;
+
+    IF p_fail_kind NOT IN ('hard','transient','soft') THEN
+      RAISE EXCEPTION 'p_fail_kind must be one of: hard, transient, soft';
+    END IF;
+
+    IF p_fail_kind = 'hard' THEN
+      v_new_streak := v_current_streak + 1;
+    ELSE
+      v_new_streak := v_current_streak;
+    END IF;
+
+    v_new_status := 'error';
+
+    IF p_fail_kind = 'hard' AND v_new_streak >= p_hard_disable_threshold THEN
+      v_new_status := 'disabled';
+      v_was_disabled := true;
+    END IF;
+
+    UPDATE data_ingest_state
+    SET
+      status = v_new_status,
+      last_error = p_error,
+      hard_fail_streak = v_new_streak,
+      last_attempted_to_utc = COALESCE(p_attempted_to, last_attempted_to_utc),
+      updated_at = v_now
+    WHERE canonical_symbol = btrim(p_symbol) AND timeframe = p_tf
+    RETURNING jsonb_build_object(
+      'canonical_symbol', canonical_symbol,
+      'timeframe', timeframe,
+      'status', status,
+      'last_error', last_error,
+      'hard_fail_streak', hard_fail_streak,
+      'last_attempted_to_utc', last_attempted_to_utc
+    ) INTO v_state;
+
+    RETURN v_state || jsonb_build_object(
+      'success', false,
+      'fail_kind', p_fail_kind,
+      'was_disabled', v_was_disabled,
+      'previous_streak', v_current_streak,
+      'new_streak', v_new_streak,
+      'hard_disable_threshold', p_hard_disable_threshold
+    );
+  END IF;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION ingest_asset_finish(text, text, boolean, text, text, timestamptz, timestamptz, timestamptz, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ingest_asset_finish(text, text, boolean, text, text, timestamptz, timestamptz, timestamptz, integer) TO service_role;
+
+COMMENT ON FUNCTION ingest_asset_finish(text, text, boolean, text, text, timestamptz, timestamptz, timestamptz, integer) IS
+'Finalize ingest state after processing an asset.
+- Success resets streak and updates cursor/successful_to.
+- Failure increments streak ONLY when fail_kind=hard.
+- Can auto-disable after threshold.
+Security: SECURITY DEFINER + fixed search_path + EXECUTE only for service_role.';

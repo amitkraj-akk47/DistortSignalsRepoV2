@@ -4,7 +4,12 @@
  * Production-ready Cloudflare Worker for ingesting market data from Massive
  * Supports Class A (1-minute) and Class B (5-minute) assets.
  * 
- * @version 1.0.0
+ * REFACTORED: Uses RPC functions to minimize subrequests:
+ * - ingest_asset_start(): Replaces POST + GET + PATCH (3 → 1)
+ * - upsert_bars_batch(): Replaces chunked POSTs (N → 1)
+ * - ingest_asset_finish(): Replaces state update PATCHes (1-2 → 1)
+ * 
+ * @version 2.0.0
  * @author DistortSignals
  */
 
@@ -70,17 +75,45 @@ interface EndpointRow {
   active: boolean;
 }
 
-interface IngestStateRow {
+// RPC response types
+interface IngestStartState {
   canonical_symbol: string;
   timeframe: string;
   last_bar_ts_utc: string | null;
   last_run_at_utc: string | null;
   status: string;
   last_error: string | null;
-  updated_at: string;
   hard_fail_streak: number;
-  last_attempted_to_utc?: string | null;
-  last_successful_to_utc?: string | null;
+  last_attempted_to_utc: string | null;
+  last_successful_to_utc: string | null;
+  updated_at: string;
+}
+
+interface UpsertBarsResult {
+  success: boolean;
+  input_count: number;
+  upserted_total: number;
+  inserted: number;
+  updated: number;
+  rejected: number;
+  rejected_samples?: Array<{ idx: number; reason: string; canonical_symbol?: string }>;
+  ts_range?: { start: string; end: string } | null;
+  error?: string;
+  error_detail?: string;
+}
+
+interface IngestFinishResult {
+  canonical_symbol: string;
+  timeframe: string;
+  status: string;
+  last_bar_ts_utc?: string;
+  last_error?: string;
+  hard_fail_streak: number;
+  success: boolean;
+  was_disabled: boolean;
+  previous_streak: number;
+  new_streak: number;
+  fail_kind?: string;
 }
 
 interface FetchRetryResult {
@@ -102,8 +135,12 @@ interface RunCounts {
   assets_disabled: number;
   http_429: number;
   rows_written: number;
+  rows_inserted: number;
+  rows_updated: number;
+  rows_rejected: number;
   duration_ms: number;
   skip_reasons: Record<string, number>;
+  subrequests: number;  // Track subrequest count
 }
 
 // ============================================================================
@@ -170,24 +207,8 @@ const LOG_LEVEL_PRIORITY: Record<LogLevel, number> = {
   ERROR: 3,
 };
 
-interface LogContext {
-  phase?: string;
-  asset?: string;
-  timeframe?: string;
-  runId?: string;
-  step?: string;
-}
-
 /**
  * Structured logger for clear, traceable output.
- * Use with `wrangler tail` to see real-time logs.
- * 
- * Features:
- * - Log level filtering via LOG_LEVEL env var
- * - Progress sampling (logs every N assets to reduce noise)
- * - Per-asset timing metrics
- * 
- * Output format: [LEVEL] [PHASE] [STEP] message {context}
  */
 class Logger {
   private runId: string | null = null;
@@ -198,7 +219,6 @@ class Logger {
   private minLevel: LogLevel;
   private progressInterval: number;
   
-  // Timing tracking
   private assetStartTime: number = 0;
   private assetTimings: number[] = [];
 
@@ -261,7 +281,6 @@ class Logger {
     console.error(this.formatMessage("ERROR", step, message, data));
   }
 
-  // Convenience methods for common log patterns
   phaseStart(phase: string, details?: Record<string, unknown>): void {
     this.setPhase(phase);
     this.info("START", `=== ${phase} ===`, details);
@@ -271,16 +290,13 @@ class Logger {
     this.info("END", `=== ${phase} complete ===`, details);
   }
 
-  // Asset lifecycle with timing
   assetStart(symbol: string, index: number, total: number, details?: Record<string, unknown>): void {
     this.setAsset(symbol, index, total);
     this.assetStartTime = Date.now();
     
-    // Log every asset at DEBUG level, but only every N assets at INFO level
     if (this.shouldLog("DEBUG")) {
       this.debug("ASSET_START", `Processing asset`, details);
     } else if (index === 1 || index % this.progressInterval === 0 || index === total) {
-      // Always log first, last, and every Nth asset
       this.info("PROGRESS", `Processing asset ${index}/${total}`, { 
         symbol, 
         percent: Math.round((index / total) * 100),
@@ -299,7 +315,6 @@ class Logger {
     const durationMs = Date.now() - this.assetStartTime;
     this.assetTimings.push(durationMs);
     
-    // Log every success at DEBUG, but sample at INFO level
     if (this.shouldLog("DEBUG")) {
       this.debug("ASSET_OK", `Asset completed successfully`, { ...details, durationMs });
     } else if (this.assetIndex === 1 || this.assetIndex % this.progressInterval === 0 || this.assetIndex === this.assetTotal) {
@@ -310,17 +325,9 @@ class Logger {
   assetFail(reason: string, details?: Record<string, unknown>): void {
     const durationMs = Date.now() - this.assetStartTime;
     this.assetTimings.push(durationMs);
-    // Always log failures
     this.error("ASSET_FAIL", `Asset failed: ${reason}`, { ...details, durationMs });
   }
 
-  // Progress indicator for long operations
-  progress(current: number, total: number, label: string): void {
-    const pct = Math.round((current / total) * 100);
-    this.info("PROGRESS", `${label}: ${current}/${total} (${pct}%)`, { current, total, percent: pct });
-  }
-
-  // Get timing statistics at end of run
   getTimingStats(): { count: number; avgMs: number; minMs: number; maxMs: number; totalMs: number } {
     if (this.assetTimings.length === 0) {
       return { count: 0, avgMs: 0, minMs: 0, maxMs: 0, totalMs: 0 };
@@ -335,7 +342,6 @@ class Logger {
     };
   }
 
-  // Log final timing summary
   logTimingSummary(): void {
     const stats = this.getTimingStats();
     if (stats.count > 0) {
@@ -350,7 +356,6 @@ class Logger {
   }
 }
 
-// Global logger instance - will be configured per run
 let log = new Logger("INFO", 10);
 
 // ============================================================================
@@ -406,7 +411,7 @@ async function urlForLogs(env: Env, url: string): Promise<string | null> {
 }
 
 function allowedProviderHosts(env: Env): Set<string> {
-  const raw = (env.ALLOWED_PROVIDER_HOSTS || "api.massive.com")
+  const raw = (env.ALLOWED_PROVIDER_HOSTS || "api.polygon.io")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
@@ -531,7 +536,7 @@ async function opsReleaseLockBestEffort(supa: SupabaseRest, jobName: string): Pr
   try {
     await supa.rpc("ops_release_job_lock", { p_job_name: jobName });
   } catch {
-    // Best effort - don't throw
+    // Best effort
   }
 }
 
@@ -571,14 +576,6 @@ async function opsRunFinishBestEffort(
     );
   } catch {
     // Best effort
-  }
-}
-
-async function opsLogAttemptBestEffort(supa: SupabaseRest, row: Record<string, unknown>): Promise<void> {
-  try {
-    await supa.post(`/rest/v1/ops_ingest_attempts`, [row], "return=minimal");
-  } catch {
-    // Never break ingestion
   }
 }
 
@@ -667,7 +664,6 @@ async function fetchJsonWithRetry(opts: {
       const latencyMs = Date.now() - t0;
       lastStatus = r.status;
 
-      // Rate limited - backoff and retry
       if (r.status === 429) {
         const ra = parseRetryAfterSeconds(r.headers.get("Retry-After"));
         const sleepSec =
@@ -680,7 +676,6 @@ async function fetchJsonWithRetry(opts: {
         continue;
       }
 
-      // Server errors - backoff and retry
       if (r.status >= 500 && r.status <= 504) {
         const sleepSec = clamp(baseBackoffSec * Math.pow(2, attempt), 0, capBackoffSec);
         const sleepMs = Math.floor(sleepSec * 1000) + jitter(250);
@@ -689,7 +684,6 @@ async function fetchJsonWithRetry(opts: {
         continue;
       }
 
-      // Client errors (4xx except 429) - don't retry
       if (!r.ok) {
         return {
           ok: false,
@@ -701,7 +695,6 @@ async function fetchJsonWithRetry(opts: {
         };
       }
 
-      // Size guard via Content-Length header
       const cl = r.headers.get("content-length");
       if (cl) {
         const n = Number(cl);
@@ -717,7 +710,6 @@ async function fetchJsonWithRetry(opts: {
         }
       }
 
-      // Read and validate body size
       const buf = await r.arrayBuffer();
       if (buf.byteLength > maxBytes) {
         return {
@@ -730,13 +722,11 @@ async function fetchJsonWithRetry(opts: {
         };
       }
 
-      // Parse JSON
       const text = new TextDecoder().decode(buf);
       try {
         const j = JSON.parse(text);
         return { ok: true, status: 200, json: j, latencyMs, attempts: attempt + 1, backoffTotalSec };
       } catch {
-        // JSON parse failure - retry if attempts remain
         if (attempt < retries - 1) {
           const sleepSec = clamp(baseBackoffSec * Math.pow(2, attempt), 0, capBackoffSec);
           const sleepMs = Math.floor(sleepSec * 1000) + jitter(250);
@@ -797,8 +787,12 @@ function expectedTfForClass(ingestClass: string | null): "1m" | "5m" | null {
   return null;
 }
 
-function classifyHttp(status: number | "ERR" | null): "critical-auth" | "hard" | "transient" | "soft" {
-  if (status === 401) return "critical-auth";
+/**
+ * Maps HTTP status to failure kind for streak logic.
+ * Only 'hard' failures increment the streak counter.
+ */
+function classifyHttpToFailKind(status: number | "ERR" | null): "hard" | "transient" | "soft" {
+  if (status === 401) return "hard";  // Auth failure - systemic
   if (status === "ERR") return "transient";
   if (status === null) return "soft";
   if ([400, 403, 404].includes(status)) return "hard";
@@ -806,14 +800,8 @@ function classifyHttp(status: number | "ERR" | null): "critical-auth" | "hard" |
   return "soft";
 }
 
-/**
- * Converts provider epoch timestamp to Date.
- * Handles both seconds (10 digits) and milliseconds (13 digits) formats.
- * Massive typically uses milliseconds, but this handles edge cases gracefully.
- */
 function providerEpochToDate(t: unknown): Date | null {
   if (typeof t !== "number" || !Number.isFinite(t)) return null;
-  // If seconds (10 digits), convert to milliseconds
   const ms = t < 1_000_000_000_000 ? t * 1000 : t;
   const d = new Date(ms);
   return Number.isNaN(d.getTime()) ? null : d;
@@ -830,37 +818,15 @@ function buildAggsRangeUrl(
 ): string {
   const base = endpoint.base_url.replace(/\/+$/, "");
   
-  // DEBUG: Log before and after each replacement
-  //console.log("=== buildAggsRangeUrl DEBUG ===");
-  //console.log("Input template:", endpoint.path_template);
-  //console.log("Input values:", { providerTicker, mult, unit, fromDate, toDate });
-  
   let path = endpoint.path_template;
-  //console.log("Step 0 - Original:", path);
-  
   path = path.replace("{ticker}", encodeURIComponent(providerTicker));
-  //console.log("Step 1 - After {ticker}:", path);
-  
   path = path.replace("{multiplier}", String(mult));
-  //console.log("Step 2 - After {multiplier}:", path);
-  
   path = path.replace("{mult}", String(mult));
-  //console.log("Step 3 - After {mult}:", path);
-  
   path = path.replace("{timespan}", unit);
-  //console.log("Step 4 - After {timespan}:", path);
-  
   path = path.replace("{unit}", unit);
-  //console.log("Step 5 - After {unit}:", path);
-  
   path = path.replace("{from}", fromDate);
-  //console.log("Step 6 - After {from}:", path);
-  
   path = path.replace("{to}", toDate);
-  //console.log("Step 7 - After {to}:", path);
-  //console.log("=== END DEBUG ===");
 
-  // Defensive: ensure all placeholders were replaced
   const unreplaced = path.match(/\{[a-zA-Z_]+\}/g);
   if (unreplaced) {
     throw new Error(`URL template placeholders not replaced: ${unreplaced.join(", ")} in path: ${path}`);
@@ -898,8 +864,12 @@ async function enforceFetchCooldownBestEffort(
   }
 }
 
+// ============================================================================
+// MAIN INGESTION FUNCTION (REFACTORED WITH RPCs)
+// ============================================================================
+
 async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> {
-  // Initialize logger with configurable level and progress interval
+  // Initialize logger
   const logLevelStr = strEnv(env.LOG_LEVEL, "INFO").toUpperCase();
   const logLevel: LogLevel = ["DEBUG", "INFO", "WARN", "ERROR"].includes(logLevelStr) 
     ? (logLevelStr as LogLevel) 
@@ -949,7 +919,6 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
     });
     throw new Error(`Invalid ASSET_ACTIVE_FIELD=${activeField}`);
   }
-  log.debug("CONFIG_VALIDATE", `ASSET_ACTIVE_FIELD validated: ${activeField}`);
 
   // Manual trigger cooldown
   if (trigger === "manual") {
@@ -1003,7 +972,8 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
       asset_active_field: activeField,
       max_response_bytes: maxBytes,
       log_url_mode: strEnv(env.LOG_URL_MODE, "sanitized"),
-      allowed_provider_hosts: strEnv(env.ALLOWED_PROVIDER_HOSTS, "api.massive.com"),
+      allowed_provider_hosts: strEnv(env.ALLOWED_PROVIDER_HOSTS, "api.polygon.io"),
+      version: "2.0.0-rpc",
     },
   });
 
@@ -1020,8 +990,12 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
     assets_disabled: 0,
     http_429: 0,
     rows_written: 0,
+    rows_inserted: 0,
+    rows_updated: 0,
+    rows_rejected: 0,
     duration_ms: 0,
     skip_reasons: {},
+    subrequests: 0,
   };
 
   const bumpSkip = (reason: string): void => {
@@ -1029,11 +1003,16 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
     counts.skip_reasons[reason] = (counts.skip_reasons[reason] || 0) + 1;
   };
 
+  // Track subrequests
+  const trackSubrequest = (n = 1): void => {
+    counts.subrequests += n;
+  };
+
   try {
     log.setPhase("LOAD_DATA");
     const gatingFilter = activeField === "active" ? "active=eq.true" : "test_active=eq.true";
 
-    // Load active assets (Class A/B, non-contract only)
+    // Load active assets
     log.info("LOAD_ASSETS", `Loading assets with filter: ${gatingFilter}`);
     const assets = await supa.get<AssetRow[]>(
       `/rest/v1/core_asset_registry_all` +
@@ -1042,23 +1021,27 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
         `&is_contract=eq.false&ingest_class=in.(A,B)` +
         `&order=canonical_symbol.asc&limit=${maxAssets}`
     );
+    trackSubrequest();
     counts.assets_total = assets.length;
     log.info("ASSETS_LOADED", `Loaded ${assets.length} assets for ingestion`);
 
-    // Load active endpoints (filtered by source=massive)
+    // Load active endpoints
     log.info("LOAD_ENDPOINTS", "Loading Massive endpoints");
     const endpoints = await supa.get<EndpointRow[]>(
       `/rest/v1/core_endpoint_registry?select=endpoint_key,source,base_url,path_template,default_params,auth_mode,active` +
         `&active=eq.true&source=eq.massive`
     );
+    trackSubrequest();
     const endpointsByKey = new Map(endpoints.map((e) => [e.endpoint_key, e] as const));
     log.info("ENDPOINTS_LOADED", `Loaded ${endpoints.length} active Massive endpoints`, {
       endpointKeys: Array.from(endpointsByKey.keys()),
     });
 
-    log.phaseEnd("LOAD_DATA", { assets: assets.length, endpoints: endpoints.length });
+    log.phaseEnd("LOAD_DATA", { assets: assets.length, endpoints: endpoints.length, subrequests: counts.subrequests });
 
-    // Process each asset
+    // ========================================================================
+    // ASSET PROCESSING LOOP (REFACTORED WITH RPCs)
+    // ========================================================================
     log.setPhase("PROCESS");
     log.info("LOOP_START", `Starting asset processing loop`, { total: assets.length });
     
@@ -1071,6 +1054,7 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
         log.warn("BUDGET_EXCEEDED", `Run budget exceeded (${maxRunBudgetMs}ms), stopping early`, {
           processed: assetIndex - 1,
           remaining: assets.length - assetIndex + 1,
+          subrequests: counts.subrequests,
         });
         break;
       }
@@ -1082,95 +1066,45 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
         endpointKey: asset.endpoint_key,
       });
 
-      // Skip contracts or Class C (should not appear due to query filter, but defensive)
+      // ====== PRE-VALIDATION (no subrequests) ======
+      
       if (asset.is_contract || asset.ingest_class === "C") {
         bumpSkip("contract_or_class_c");
         log.assetSkip("contract_or_class_c", { is_contract: asset.is_contract, ingest_class: asset.ingest_class });
-        await opsLogAttemptBestEffort(supa, {
-          run_id: runId,
-          canonical_symbol: canonical,
-          provider_ticker: asset.provider_ticker,
-          asset_class: asset.asset_class,
-          endpoint_key: asset.endpoint_key,
-          timeframe: asset.base_timeframe ?? "",
-          error_text: "Out of scope (contract or class C)",
-          meta: { skip_reason: "contract_or_class_c" },
-        });
-        await sleep(200 + jitter(300));
+        await sleep(100 + jitter(100));
         continue;
       }
 
-      // Validate provider ticker
       if (!asset.provider_ticker) {
         bumpSkip("missing_provider_ticker");
         log.assetSkip("missing_provider_ticker");
-        await opsLogAttemptBestEffort(supa, {
-          run_id: runId,
-          canonical_symbol: canonical,
-          endpoint_key: asset.endpoint_key,
-          timeframe: asset.base_timeframe ?? "",
-          error_text: "provider_ticker is NULL",
-          meta: { skip_reason: "missing_provider_ticker" },
-        });
-        await sleep(200 + jitter(300));
+        await sleep(100 + jitter(100));
         continue;
       }
 
-      // Validate timeframe matches ingest class
       const expectedTf = expectedTfForClass(asset.ingest_class);
       const tf = (expectedTf || asset.base_timeframe || "1m") as "1m" | "5m";
 
       if (!expectedTf || tf !== expectedTf) {
         bumpSkip("class_tf_mismatch");
         log.assetSkip("class_tf_mismatch", { expected: expectedTf, got: tf, ingestClass: asset.ingest_class });
-        await opsLogAttemptBestEffort(supa, {
-          run_id: runId,
-          canonical_symbol: canonical,
-          provider_ticker: asset.provider_ticker,
-          endpoint_key: asset.endpoint_key,
-          timeframe: tf,
-          error_text: "class/timeframe mismatch",
-          meta: { skip_reason: "class_tf_mismatch", expected: expectedTf, got: tf },
-        });
-        await sleep(200 + jitter(300));
+        await sleep(100 + jitter(100));
         continue;
       }
 
-
-      // Get endpoint configuration
-      log.debug("ENDPOINT_LOOKUP", `Looking up endpoint: ${asset.endpoint_key}`);
       const endpoint = endpointsByKey.get(asset.endpoint_key);
       if (!endpoint) {
         bumpSkip("missing_endpoint_config");
         log.assetSkip("missing_endpoint_config", { endpoint_key: asset.endpoint_key });
-        await opsLogAttemptBestEffort(supa, {
-          run_id: runId,
-          canonical_symbol: canonical,
-          provider_ticker: asset.provider_ticker,
-          asset_class: asset.asset_class,
-          endpoint_key: asset.endpoint_key,
-          timeframe: tf,
-          error_text: `Missing endpoint_key=${asset.endpoint_key}`,
-          meta: { skip_reason: "missing_endpoint_config" },
-        });
-        await sleep(200 + jitter(300));
+        await sleep(100 + jitter(100));
         continue;
       }
 
-      // Security: validate endpoint host is allowlisted
       if (!isHostAllowlisted(env, endpoint.base_url)) {
         bumpSkip("endpoint_not_allowlisted");
         log.assetSkip("endpoint_not_allowlisted (SECURITY)", { 
           endpoint_key: endpoint.endpoint_key, 
           base_url: sanitizeUrlForLogging(endpoint.base_url) 
-        });
-        await opsLogAttemptBestEffort(supa, {
-          run_id: runId,
-          canonical_symbol: canonical,
-          endpoint_key: asset.endpoint_key,
-          timeframe: tf,
-          error_text: "Endpoint base_url not allowlisted",
-          meta: { skip_reason: "endpoint_not_allowlisted" },
         });
         await opsUpsertIssueBestEffort(supa, issuesOn, {
           severity_level: 1,
@@ -1180,68 +1114,53 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
           component: "security",
           summary: "Endpoint allowlist violation",
           description: "Endpoint base_url host is not allowlisted; refusing to send provider credentials.",
-          metadata: { 
-            endpoint_key: endpoint.endpoint_key, 
-            base_url: sanitizeUrlForLogging(endpoint.base_url) 
-          },
+          metadata: { endpoint_key: endpoint.endpoint_key, base_url: sanitizeUrlForLogging(endpoint.base_url) },
           related_job_run_id: runId,
         });
-        await sleep(200 + jitter(300));
+        trackSubrequest();
+        await sleep(100 + jitter(100));
         continue;
       }
 
       counts.assets_attempted++;
-      log.debug("VALIDATION_PASSED", "Asset passed all validation checks", { tf, endpoint_key: asset.endpoint_key });
 
-      // Ensure ingest state row exists
-      log.debug("STATE_ENSURE", "Ensuring ingest state row exists");
-      await supa.post(
-        `/rest/v1/data_ingest_state?on_conflict=canonical_symbol,timeframe`,
-        [{ canonical_symbol: canonical, timeframe: tf, status: "ok", updated_at: toIso(nowUtc()) }],
-        "resolution=merge-duplicates,return=minimal"
-      );
+      // ====== STEP 1: ingest_asset_start RPC (replaces POST + GET + PATCH) ======
+      log.debug("RPC_START", "Calling ingest_asset_start");
+      let state: IngestStartState;
+      try {
+        state = await supa.rpc<IngestStartState>("ingest_asset_start", {
+          p_symbol: canonical,
+          p_tf: tf,
+        });
+        trackSubrequest();
+        log.debug("RPC_START_OK", "State loaded and marked running", {
+          lastBarTs: state.last_bar_ts_utc,
+          hardFailStreak: state.hard_fail_streak,
+        });
+      } catch (e) {
+        const errMsg = e instanceof Error ? e.message : String(e);
+        log.assetFail(`ingest_asset_start RPC failed: ${errMsg}`);
+        counts.assets_failed++;
+        await sleep(100 + jitter(100));
+        continue;
+      }
 
-      // Load current state
-      log.debug("STATE_LOAD", "Loading current ingest state");
-      const stateRows = await supa.get<IngestStateRow[]>(
-        `/rest/v1/data_ingest_state?select=canonical_symbol,timeframe,last_bar_ts_utc,last_run_at_utc,status,last_error,updated_at,hard_fail_streak,last_attempted_to_utc,last_successful_to_utc` +
-          `&canonical_symbol=eq.${encodeURIComponent(canonical)}` +
-          `&timeframe=eq.${encodeURIComponent(tf)}` +
-          `&limit=1`
-      );
-      const state = stateRows[0];
-      log.debug("STATE_LOADED", "Current state retrieved", {
-        lastBarTs: state?.last_bar_ts_utc,
-        status: state?.status,
-        hardFailStreak: state?.hard_fail_streak,
-      });
-
-      // Mark as running
-      await supa.patch(
-        `/rest/v1/data_ingest_state?canonical_symbol=eq.${encodeURIComponent(canonical)}&timeframe=eq.${encodeURIComponent(tf)}`,
-        { status: "running", last_run_at_utc: toIso(nowUtc()), updated_at: toIso(nowUtc()) },
-        "return=minimal"
-      );
-
-      // Calculate time window
-      log.debug("WINDOW_CALC", "Calculating fetch time window");
+      // ====== STEP 2: Calculate time window ======
       const tfSec = tfToSeconds(tf);
       const safetyLagSec = tf === "1m" ? 120 : 480;
       const overlapBars = tf === "1m" ? 5 : 2;
-      const backfillDays = 7;
+      const backfillDays = state.last_bar_ts_utc ? 1 : 7;  // Only 7 days on first run
 
       const safeTo = floorToBoundary(new Date(Date.now() - safetyLagSec * 1000), tfSec);
 
       let fromTs: Date;
-      if (!state?.last_bar_ts_utc) {
-        // No prior data - backfill from backfillDays ago
+      if (!state.last_bar_ts_utc) {
         fromTs = floorToBoundary(new Date(safeTo.getTime() - backfillDays * 86400 * 1000), tfSec);
         log.info("WINDOW_BACKFILL", `No prior cursor, backfilling ${backfillDays} days`, {
           from: toIso(fromTs),
           to: toIso(safeTo),
         });
       } else {
-        // Resume from last bar with overlap
         const cursor = new Date(state.last_bar_ts_utc);
         const overlapStart = new Date(cursor.getTime() - overlapBars * tfSec * 1000);
         const backfillFloor = new Date(safeTo.getTime() - backfillDays * 86400 * 1000);
@@ -1253,57 +1172,30 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
         });
       }
 
-      // Record attempted window
-      try {
-        await supa.patch(
-          `/rest/v1/data_ingest_state?canonical_symbol=eq.${encodeURIComponent(canonical)}&timeframe=eq.${encodeURIComponent(tf)}`,
-          { last_attempted_to_utc: toIso(safeTo), updated_at: toIso(nowUtc()) },
-          "return=minimal"
-        );
-      } catch {
-        // Best effort
-      }
-
       // No-op if window is empty
       if (fromTs.getTime() >= safeTo.getTime()) {
         log.info("WINDOW_NOOP", "No new data to fetch (already up to date)");
+        
+        // Mark success with ingest_asset_finish
+        try {
+          await supa.rpc<IngestFinishResult>("ingest_asset_finish", {
+            p_symbol: canonical,
+            p_tf: tf,
+            p_success: true,
+            p_successful_to: toIso(safeTo),
+          });
+          trackSubrequest();
+        } catch {
+          // Best effort
+        }
+        
         counts.assets_succeeded++;
-
-        await opsLogAttemptBestEffort(supa, {
-          run_id: runId,
-          canonical_symbol: canonical,
-          provider_ticker: asset.provider_ticker,
-          asset_class: asset.asset_class,
-          endpoint_key: asset.endpoint_key,
-          timeframe: tf,
-          req_from_utc: toIso(fromTs),
-          req_to_utc: toIso(safeTo),
-          http_status: 200,
-          latency_ms: 0,
-          result_count: 0,
-          inserted_count: 0,
-          deduped_count: 0,
-          error_text: null,
-          meta: { note: "noop_window" },
-        });
-
-        await supa.patch(
-          `/rest/v1/data_ingest_state?canonical_symbol=eq.${encodeURIComponent(canonical)}&timeframe=eq.${encodeURIComponent(tf)}`,
-          {
-            status: "ok",
-            last_error: null,
-            last_successful_to_utc: toIso(safeTo),
-            updated_at: toIso(nowUtc()),
-          },
-          "return=minimal"
-        );
-
         log.assetSuccess({ note: "noop_window" });
-        await sleep(200 + jitter(300));
+        await sleep(100 + jitter(100));
         continue;
       }
 
-      // Build request URL
+      // ====== STEP 3: Fetch from provider ======
       const mult = tf === "1m" ? 1 : 5;
       const fromDate = alignIsoToDateYYYYMMDD(toIso(fromTs));
       const toDate = alignIsoToDateYYYYMMDD(toIso(safeTo));
@@ -1311,26 +1203,8 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
       const mergedParams: Json = { ...(endpoint.default_params || {}), ...(asset.query_params || {}) };
       if (!("limit" in mergedParams)) mergedParams["limit"] = 50000;
 
-      // DEBUG: Log template before URL building
-      log.debug("TEMPLATE_DEBUG", "Path template inspection", {
-        raw_template: endpoint.path_template,
-        template_length: endpoint.path_template.length,
-        has_multiplier: endpoint.path_template.includes("{multiplier}"),
-        has_timespan: endpoint.path_template.includes("{timespan}"),
-        has_ticker: endpoint.path_template.includes("{ticker}"),
-        mult_value: mult,
-        unit_value: "minute",
-        ticker_value: asset.provider_ticker,
-      });
-
       const url = buildAggsRangeUrl(endpoint, asset.provider_ticker, mult, "minute", fromDate, toDate, mergedParams);
       const urlLog = await urlForLogs(env, url);
-      
-      log.debug("URL_BUILT", "Final URL constructed", {
-        url: url,
-        url_length: url.length,
-        has_encoded_braces: url.includes("%7B") || url.includes("%7D"),
-      });
       
       log.info("HTTP_REQUEST", `Fetching bars from provider`, {
         from: fromDate,
@@ -1339,30 +1213,27 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
         providerTicker: asset.provider_ticker,
       });
 
-      // Make request with retry
       const headers = { Authorization: `Bearer ${env.MASSIVE_KEY}` };
-      const fetchStartMs = Date.now();
       const resp = await fetchJsonWithRetry({
         url,
         headers,
         timeoutMs,
         maxBytes,
       });
+      // Provider fetch counts as 1 subrequest (external)
       
       log.info("HTTP_RESPONSE", `Provider response received`, {
         ok: resp.ok,
         status: resp.status,
         latencyMs: resp.latencyMs,
         attempts: resp.attempts,
-        backoffTotalSec: resp.backoffTotalSec,
       });
 
       if (resp.status === 429) counts.http_429++;
 
-      // Check for provider-level errors in response body
+      // ====== STEP 4: Handle provider errors ======
       const respJson = resp.json as Record<string, unknown> | undefined;
-      const providerBodyError =
-        resp.ok && (respJson?.status === "ERROR" || respJson?.error || respJson?.message);
+      const providerBodyError = resp.ok && (respJson?.status === "ERROR" || respJson?.error || respJson?.message);
 
       if (!resp.ok || providerBodyError) {
         // Auth failure is systemic - abort entire run
@@ -1379,6 +1250,7 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
             metadata: { run_id: runId, endpoint_key: asset.endpoint_key, example_asset: canonical, url: urlLog },
             related_job_run_id: runId,
           });
+          trackSubrequest();
           throw new Error("Provider auth failure (401) – stopping run");
         }
 
@@ -1386,136 +1258,69 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
           ? String(respJson?.error || respJson?.message || "Provider error in body")
           : String(resp.err || "Unknown error");
 
-        const kind = classifyHttp(resp.ok ? 200 : resp.status);
-        const isHard = kind === "hard";
-        const prevStreak = Number(state?.hard_fail_streak || 0);
-        const nextStreak = isHard ? prevStreak + 1 : prevStreak;
+        const failKind = classifyHttpToFailKind(resp.ok ? 200 : resp.status);
 
         log.assetFail(errText, {
           status: resp.status,
-          kind,
-          isHard,
-          hardFailStreak: nextStreak,
-          threshold: hardDisableStreak,
+          failKind,
+          hardFailStreak: state.hard_fail_streak,
         });
 
-        counts.assets_failed++;
-
-        await opsLogAttemptBestEffort(supa, {
-          run_id: runId,
-          canonical_symbol: canonical,
-          provider_ticker: asset.provider_ticker,
-          asset_class: asset.asset_class,
-          endpoint_key: asset.endpoint_key,
-          timeframe: tf,
-          req_from_utc: toIso(fromTs),
-          req_to_utc: toIso(safeTo),
-          http_status: typeof resp.status === "number" ? resp.status : null,
-          latency_ms: resp.latencyMs,
-          result_count: null,
-          inserted_count: 0,
-          deduped_count: 0,
-          error_text: errText,
-          meta: {
-            url: urlLog,
-            attempts: resp.attempts,
-            backoff_total_sec: resp.backoffTotalSec,
-            kind,
-            hard_fail_streak: nextStreak,
-          },
-        });
-
-        // Log issue for failed fetch
-        await opsUpsertIssueBestEffort(supa, issuesOn, {
-          severity_level: isHard ? 2 : 3,
-          issue_type: "ASSET_FETCH_FAILED",
-          source_system: "ingestion",
-          canonical_symbol: canonical,
-          timeframe: tf,
-          component: "massive",
-          summary: `Fetch failed (${isHard ? "hard" : "transient"})`,
-          description: errText,
-          metadata: { run_id: runId, http_status: resp.status, url: urlLog, hard_fail_streak: nextStreak, kind },
-          related_job_run_id: runId,
-        });
-
-        // Update state with error and streak
+        // Call ingest_asset_finish with failure
         try {
-          await supa.patch(
-            `/rest/v1/data_ingest_state?canonical_symbol=eq.${encodeURIComponent(canonical)}&timeframe=eq.${encodeURIComponent(tf)}`,
-            { status: "error", last_error: errText, hard_fail_streak: nextStreak, updated_at: toIso(nowUtc()) },
-            "return=minimal"
-          );
-        } catch {
-          await supa.patch(
-            `/rest/v1/data_ingest_state?canonical_symbol=eq.${encodeURIComponent(canonical)}&timeframe=eq.${encodeURIComponent(tf)}`,
-            { status: "error", last_error: errText, updated_at: toIso(nowUtc()) },
-            "return=minimal"
-          );
-        }
-
-        // Auto-disable after consecutive hard failures
-        if (isHard && nextStreak >= hardDisableStreak) {
-          counts.assets_disabled++;
-          log.warn("AUTO_DISABLE", `Disabling asset after ${nextStreak} consecutive hard failures`);
-
-          const disablePatch =
-            activeField === "test_active"
+          const finishResult = await supa.rpc<IngestFinishResult>("ingest_asset_finish", {
+            p_symbol: canonical,
+            p_tf: tf,
+            p_success: false,
+            p_fail_kind: failKind,
+            p_error: errText,
+            p_attempted_to: toIso(safeTo),
+            p_hard_disable_threshold: hardDisableStreak,
+          });
+          trackSubrequest();
+          
+          if (finishResult.was_disabled) {
+            counts.assets_disabled++;
+            log.warn("AUTO_DISABLE", `Asset auto-disabled after ${finishResult.new_streak} hard failures`);
+            
+            // Also update the registry
+            const disablePatch = activeField === "test_active"
               ? { test_active: false, updated_at: toIso(nowUtc()) }
               : { active: false, updated_at: toIso(nowUtc()) };
-
-          await supa.patch(
-            `/rest/v1/core_asset_registry_all?canonical_symbol=eq.${encodeURIComponent(canonical)}`,
-            disablePatch,
-            "return=minimal"
-          );
-
-          await supa.patch(
-            `/rest/v1/data_ingest_state?canonical_symbol=eq.${encodeURIComponent(canonical)}&timeframe=eq.${encodeURIComponent(tf)}`,
-            { status: "disabled", updated_at: toIso(nowUtc()) },
-            "return=minimal"
-          );
-
-          await opsUpsertIssueBestEffort(supa, issuesOn, {
-            severity_level: 1,
-            issue_type: "ASSET_DISABLED",
-            source_system: "ingestion",
-            canonical_symbol: canonical,
-            timeframe: tf,
-            component: "ingestion",
-            summary: "Asset auto-disabled",
-            description: `Disabled after ${nextStreak} consecutive hard failures.`,
-            metadata: { 
-              run_id: runId, 
-              http_status: resp.status, 
-              last_error: errText, 
-              url: urlLog, 
-              streak: nextStreak, 
-              gating_field: activeField 
-            },
-            related_job_run_id: runId,
-          });
+            await supa.patch(
+              `/rest/v1/core_asset_registry_all?canonical_symbol=eq.${encodeURIComponent(canonical)}`,
+              disablePatch,
+              "return=minimal"
+            );
+            trackSubrequest();
+            
+            await opsUpsertIssueBestEffort(supa, issuesOn, {
+              severity_level: 1,
+              issue_type: "ASSET_DISABLED",
+              source_system: "ingestion",
+              canonical_symbol: canonical,
+              timeframe: tf,
+              component: "ingestion",
+              summary: "Asset auto-disabled",
+              description: `Disabled after ${finishResult.new_streak} consecutive hard failures.`,
+              metadata: { run_id: runId, http_status: resp.status, last_error: errText, streak: finishResult.new_streak },
+              related_job_run_id: runId,
+            });
+            trackSubrequest();
+          }
+        } catch {
+          // Best effort
         }
 
-        await sleep(200 + jitter(500));
+        counts.assets_failed++;
+        await sleep(100 + jitter(200));
         continue;
       }
 
-      // Parse and validate results
+      // ====== STEP 5: Parse and filter bars ======
       const resultsAny = respJson?.results;
       const results: Array<Record<string, unknown>> = Array.isArray(resultsAny) ? resultsAny : [];
 
-      if (!Array.isArray(resultsAny)) {
-        await opsLogAttemptBestEffort(supa, {
-          run_id: runId,
-          canonical_symbol: canonical,
-          endpoint_key: asset.endpoint_key,
-          timeframe: tf,
-          meta: { warning: "unexpected_response_shape", url: urlLog, got: typeof resultsAny },
-        });
-      }
-
-      // Filter results to [fromTs, safeTo) window
       log.debug("FILTER_BARS", `Filtering ${results.length} bars to time window`);
       const filtered = results
         .map((r) => ({
@@ -1537,7 +1342,7 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
         droppedCount: results.length - filtered.length,
       });
 
-      // Transform to bar rows
+      // Transform to bar rows for RPC
       const barRows = filtered.map((x) => {
         const r = x.raw;
         return {
@@ -1559,125 +1364,97 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
         };
       });
 
-      // Chunked upsert to avoid request size limits
-      const CHUNK_SIZE = 5000;
-      let inserted = 0;
-
+      // ====== STEP 6: upsert_bars_batch RPC (replaces chunked POSTs) ======
+      let upsertResult: UpsertBarsResult | null = null;
+      
       if (barRows.length > 0) {
-        log.info("DB_UPSERT", `Upserting ${barRows.length} bars to database`, {
-          chunks: Math.ceil(barRows.length / CHUNK_SIZE),
-          chunkSize: CHUNK_SIZE,
-        });
+        log.info("RPC_UPSERT", `Upserting ${barRows.length} bars via RPC`);
         
         try {
-          for (let i = 0; i < barRows.length; i += CHUNK_SIZE) {
-            const chunk = barRows.slice(i, i + CHUNK_SIZE);
-            const chunkNum = Math.floor(i / CHUNK_SIZE) + 1;
-            const totalChunks = Math.ceil(barRows.length / CHUNK_SIZE);
-            
-            log.debug("CHUNK_UPSERT", `Upserting chunk ${chunkNum}/${totalChunks}`, { size: chunk.length });
-            
-            await supa.post(
-              `/rest/v1/data_bars?on_conflict=canonical_symbol,timeframe,ts_utc`,
-              chunk,
-              "resolution=merge-duplicates,return=minimal"
-            );
-            inserted += chunk.length;
-          }
-          counts.rows_written += inserted;
-          log.info("DB_UPSERT_OK", `Successfully upserted ${inserted} bars`);
-        } catch (e) {
-          counts.assets_failed++;
-          const errMsg = e instanceof Error ? e.message : String(e);
-          log.assetFail(`Bar insert failed: ${errMsg}`);
-
-          await opsLogAttemptBestEffort(supa, {
-            run_id: runId,
-            canonical_symbol: canonical,
-            provider_ticker: asset.provider_ticker,
-            asset_class: asset.asset_class,
-            endpoint_key: asset.endpoint_key,
-            timeframe: tf,
-            req_from_utc: toIso(fromTs),
-            req_to_utc: toIso(safeTo),
-            http_status: 200,
-            latency_ms: resp.latencyMs,
-            result_count: results.length,
-            inserted_count: 0,
-            deduped_count: 0,
-            error_text: "BAR_INSERT_FAILED",
-            meta: { url: urlLog },
+          upsertResult = await supa.rpc<UpsertBarsResult>("upsert_bars_batch", {
+            p_bars: barRows,
           });
-
-          await sleep(200 + jitter(500));
+          trackSubrequest();
+          
+          if (!upsertResult.success) {
+            throw new Error(upsertResult.error || "upsert_bars_batch returned success=false");
+          }
+          
+          counts.rows_written += upsertResult.upserted_total;
+          counts.rows_inserted += upsertResult.inserted;
+          counts.rows_updated += upsertResult.updated;
+          counts.rows_rejected += upsertResult.rejected;
+          
+          log.info("RPC_UPSERT_OK", `Upserted ${upsertResult.upserted_total} bars`, {
+            inserted: upsertResult.inserted,
+            updated: upsertResult.updated,
+            rejected: upsertResult.rejected,
+            tsRange: upsertResult.ts_range,
+          });
+          
+          if (upsertResult.rejected > 0 && upsertResult.rejected_samples) {
+            log.warn("BARS_REJECTED", `${upsertResult.rejected} bars rejected by validation`, {
+              samples: upsertResult.rejected_samples.slice(0, 3),
+            });
+          }
+        } catch (e) {
+          const errMsg = e instanceof Error ? e.message : String(e);
+          log.assetFail(`upsert_bars_batch RPC failed: ${errMsg}`);
+          
+          // Mark failure
+          try {
+            await supa.rpc<IngestFinishResult>("ingest_asset_finish", {
+              p_symbol: canonical,
+              p_tf: tf,
+              p_success: false,
+              p_fail_kind: "transient",
+              p_error: `Bar upsert failed: ${errMsg}`,
+              p_attempted_to: toIso(safeTo),
+            });
+            trackSubrequest();
+          } catch {
+            // Best effort
+          }
+          
+          counts.assets_failed++;
+          await sleep(100 + jitter(200));
           continue;
         }
       } else {
         log.info("NO_NEW_BARS", "No bars to upsert (all filtered out or empty response)");
       }
 
-      // Update cursor to newest bar (only if we fetched any bars)
-      const newCursor = barRows.length > 0 ? barRows[barRows.length - 1].ts_utc : state?.last_bar_ts_utc;
-      log.debug("CURSOR_UPDATE", `Cursor: ${state?.last_bar_ts_utc} -> ${newCursor}`);
-
-      counts.assets_succeeded++;
-
-      await opsLogAttemptBestEffort(supa, {
-        run_id: runId,
-        canonical_symbol: canonical,
-        provider_ticker: asset.provider_ticker,
-        asset_class: asset.asset_class,
-        endpoint_key: asset.endpoint_key,
-        timeframe: tf,
-        req_from_utc: toIso(fromTs),
-        req_to_utc: toIso(safeTo),
-        http_status: 200,
-        latency_ms: resp.latencyMs,
-        result_count: results.length,
-        inserted_count: inserted,  // Actually "rows_sent" - can't distinguish insert vs update with merge-duplicates
-        deduped_count: null,       // Unknown with resolution=merge-duplicates
-        error_text: null,
-        meta: {
-          url: urlLog,
-          attempts: resp.attempts,
-          backoff_total_sec: resp.backoffTotalSec,
-          filtered_count: barRows.length,
-        },
-      });
-
-      // Update state with success and reset streak
+      // ====== STEP 7: ingest_asset_finish RPC (success) ======
+      const newCursor = barRows.length > 0 ? barRows[barRows.length - 1].ts_utc : state.last_bar_ts_utc;
+      
       try {
-        await supa.patch(
-          `/rest/v1/data_ingest_state?canonical_symbol=eq.${encodeURIComponent(canonical)}&timeframe=eq.${encodeURIComponent(tf)}`,
-          {
-            last_bar_ts_utc: newCursor,
-            last_successful_to_utc: toIso(safeTo),
-            status: "ok",
-            last_error: null,
-            hard_fail_streak: 0,
-            updated_at: toIso(nowUtc()),
-          },
-          "return=minimal"
-        );
-      } catch {
-        await supa.patch(
-          `/rest/v1/data_ingest_state?canonical_symbol=eq.${encodeURIComponent(canonical)}&timeframe=eq.${encodeURIComponent(tf)}`,
-          {
-            last_bar_ts_utc: newCursor,
-            last_successful_to_utc: toIso(safeTo),
-            status: "ok",
-            last_error: null,
-            updated_at: toIso(nowUtc()),
-          },
-          "return=minimal"
-        );
+        await supa.rpc<IngestFinishResult>("ingest_asset_finish", {
+          p_symbol: canonical,
+          p_tf: tf,
+          p_success: true,
+          p_new_cursor: newCursor,
+          p_successful_to: toIso(safeTo),
+        });
+        trackSubrequest();
+      } catch (e) {
+        const errMsg = e instanceof Error ? e.message : String(e);
+        log.warn("RPC_FINISH_WARN", `ingest_asset_finish failed (non-fatal): ${errMsg}`);
       }
 
-      log.assetSuccess({ bars: barRows.length, newCursor });
-      await sleep(200 + jitter(300));
+      counts.assets_succeeded++;
+      log.assetSuccess({ 
+        bars: barRows.length, 
+        inserted: upsertResult?.inserted ?? 0,
+        updated: upsertResult?.updated ?? 0,
+        newCursor,
+      });
+      
+      await sleep(100 + jitter(150));
     }
 
-    // Job completed successfully
+    // ========================================================================
+    // JOB COMPLETION
+    // ========================================================================
     counts.duration_ms = Date.now() - runStartMs;
     log.setPhase("COMPLETE");
     log.setAsset(null);
@@ -1686,6 +1463,7 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
     log.info("STATS", "=== FINAL STATISTICS ===", {
       duration_ms: counts.duration_ms,
       duration_sec: Math.round(counts.duration_ms / 1000),
+      subrequests: counts.subrequests,
     });
     log.info("ASSETS", `Assets: ${counts.assets_succeeded}/${counts.assets_total} succeeded`, {
       total: counts.assets_total,
@@ -1697,9 +1475,12 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
     });
     log.info("DATA", `Data: ${counts.rows_written} rows written`, {
       rows_written: counts.rows_written,
+      rows_inserted: counts.rows_inserted,
+      rows_updated: counts.rows_updated,
+      rows_rejected: counts.rows_rejected,
       http_429_count: counts.http_429,
     });
-    log.logTimingSummary();  // Log per-asset timing statistics
+    log.logTimingSummary();
     if (Object.keys(counts.skip_reasons).length > 0) {
       log.info("SKIP_REASONS", "Skip breakdown", counts.skip_reasons);
     }
@@ -1711,8 +1492,9 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
       error_message: null,
       metadata: { ...run.metadata, ...counts },
     });
+    trackSubrequest();
     
-    log.info("JOB_COMPLETE", `✓ Ingestion job completed successfully`);
+    log.info("JOB_COMPLETE", `✓ Ingestion job completed successfully`, { subrequests: counts.subrequests });
   } catch (e: unknown) {
     counts.duration_ms = Date.now() - runStartMs;
     const err = e as Error;
@@ -1721,6 +1503,7 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
     log.error("JOB_FAILED", `✗ Ingestion job FAILED: ${err.message}`, {
       error: err.message,
       duration_ms: counts.duration_ms,
+      subrequests: counts.subrequests,
       counts,
     });
 
@@ -1761,7 +1544,6 @@ export default {
   },
 
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    // Auth check first - no DB calls before authorization
     const authorized = await isAuthorizedInternal(req, env);
     if (!authorized) {
       return new Response("Not Found", { status: 404 });
@@ -1769,23 +1551,20 @@ export default {
 
     const url = new URL(req.url);
 
-    // Health endpoint
     if (url.pathname === "/health") {
       return new Response(
         JSON.stringify({
           status: "ok",
+          version: "2.0.0-rpc",
           job_name: env.JOB_NAME || "ingest_ab",
           asset_active_field: env.ASSET_ACTIVE_FIELD || "active",
           max_assets_per_run: env.MAX_ASSETS_PER_RUN || "200",
-          log_url_mode: env.LOG_URL_MODE || "sanitized",
-          max_response_bytes: env.MAX_RESPONSE_BYTES || String(10 * 1024 * 1024),
-          allowed_provider_hosts: env.ALLOWED_PROVIDER_HOSTS || "api.massive.com",
+          log_level: env.LOG_LEVEL || "INFO",
         }),
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
     }
 
-    // Manual trigger endpoint
     if (url.pathname === "/trigger" || url.pathname === "/") {
       ctx.waitUntil(runIngestAB(env, "manual"));
       return new Response("ok\n", { status: 200 });
