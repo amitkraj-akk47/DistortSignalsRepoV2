@@ -30,15 +30,29 @@ function isTransientError(e: any): boolean {
 
 export default {
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(runAggregation(env));
+    const startTime = Date.now();
+    console.log(`[AGGREGATOR] Cron triggered at ${new Date().toISOString()}`);
+    
+    ctx.waitUntil(
+      runAggregation(env).then(() => {
+        const duration = Date.now() - startTime;
+        console.log(`[AGGREGATOR] Completed in ${duration}ms`);
+      }).catch((e) => {
+        const duration = Date.now() - startTime;
+        console.error(`[AGGREGATOR] Failed after ${duration}ms:`, e);
+      })
+    );
   },
 };
 
-async function runAggregation(env: Env): Promise<void> {
-  const envName = (env.ENV_NAME ?? "DEV").toUpperCase();
-  const jobName = env.JOB_NAME ?? "agg-master";
-  const trigger = env.TRIGGER ?? "cron";
+async ole.log(`[AGG] Starting: env=${envName} job=${jobName} maxTasks=${maxTasks}`);
 
+  const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false },
+  });
+
+  const runId = crypto.randomUUID();
+  console.log(`[AGG] Run ID: ${runId}`
   const maxTasks = Number(env.MAX_TASKS_PER_RUN ?? "20");
   const maxWindows = Number(env.MAX_WINDOWS_PER_TASK ?? "100");
   const runningStaleSeconds = Number(env.RUNNING_STALE_SECONDS ?? "900");
@@ -69,13 +83,16 @@ async function runAggregation(env: Env): Promise<void> {
     p_now_utc: new Date().toISOString(),
     p_limit: maxTasks,
     p_running_stale_seconds: runningStaleSeconds,
-  });
-
-  if (tasksErr) {
+  })console.error(`[AGG] Failed to get tasks:`, tasksErr);
     await supabase.rpc("ops_runlog_finish", {
       p_run_id: runId,
       p_status: "failed",
       p_stats: { error: String(tasksErr.message ?? tasksErr) },
+    });
+    return;
+  }
+
+  console.log(`[AGG] Found ${tasks?.length ?? 0} due tasks`);   p_stats: { error: String(tasksErr.message ?? tasksErr) },
     });
     return;
   }
@@ -162,6 +179,8 @@ async function runAggregation(env: Env): Promise<void> {
   }
 
   await supabase.rpc("ops_runlog_prune", { p_job_name: jobName, p_trigger: trigger, p_keep: 10 });
+
+  console.log(`[AGG] Completed: ${totalCreated} bars created, ${totalPoor} poor quality, ${tasks?.length ?? 0} tasks processed`);
 
   await supabase.rpc("ops_runlog_finish", {
     p_run_id: runId,
