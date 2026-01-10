@@ -1,0 +1,22 @@
+{
+  "name": "@distortsignals/aggregator",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:dev": "wrangler deploy --env dev",
+    "deploy:test": "wrangler deploy --env test",
+    "deploy:stage": "wrangler deploy --env stage",
+    "deploy:prod": "wrangler deploy --env prod",
+    "tail": "wrangler tail",
+    "tail:dev": "wrangler tail --env dev"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20231218.0",
+    "wrangler": "^3.22.0"
+  }
+}

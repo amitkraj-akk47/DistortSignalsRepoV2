@@ -21,6 +21,19 @@ importers:
         specifier: ^5.3.0
         version: 5.9.3
 
+  apps/typescript/aggregator:
+    dependencies:
+      '@supabase/supabase-js':
+        specifier: ^2.39.0
+        version: 2.90.0
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^4.20231218.0
+        version: 4.20260108.0
+      wrangler:
+        specifier: ^3.22.0
+        version: 3.114.16(@cloudflare/workers-types@4.20260108.0)
+
   apps/typescript/communication-hub:
     dependencies:
       '@distortsignals/ts-contracts':
@@ -1409,6 +1422,7 @@ packages:
 
   /color-name@1.1.4:
     resolution: {integrity: sha512-dOy+3AuW3a2wNbZHIuMZpTcgjGuLU/uBL/ubcZF9OXbDo8ff4O8yVp5Bf0efS8uEoYo5q4Fx7dY9OgQGXgAsQA==}
+    requiresBuild: true
     dev: true
 
   /color-string@1.9.1:

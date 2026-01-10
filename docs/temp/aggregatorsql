@@ -1,0 +1,719 @@
+-- DistortSignals Aggregation + DXY + Admin Pack v1
+-- Semantics: ts_utc=bucket start; ranges are [from,to); UTC
+begin;
+
+-- =========================
+-- 1) derived_data_bars
+-- =========================
+create table if not exists derived_data_bars (
+  id bigserial primary key,
+  canonical_symbol text not null,
+  timeframe text not null,
+  ts_utc timestamptz not null,
+
+  open double precision not null,
+  high double precision not null,
+  low  double precision not null,
+  close double precision not null,
+
+  vol double precision,
+  vwap double precision,
+  trade_count integer,
+
+  is_partial boolean not null default false,
+
+  source text not null default 'agg',    -- agg | dxy | ...
+  ingested_at timestamptz not null default now(),
+
+  source_timeframe text,                -- 1m or 5m
+  source_candles integer,
+  expected_candles integer,
+  quality_score integer,
+
+  derivation_version integer not null default 1,
+  deleted_at timestamptz,
+  raw jsonb not null default '{}'::jsonb,
+
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table derived_data_bars enable row level security;
+
+-- Soft-delete safe uniqueness: only one ACTIVE bar per (symbol,tf,ts)
+create unique index if not exists uq_derived_active_symbol_tf_ts
+  on derived_data_bars (canonical_symbol, timeframe, ts_utc)
+  where deleted_at is null;
+
+create index if not exists idx_derived_sym_tf_ts_desc
+  on derived_data_bars (canonical_symbol, timeframe, ts_utc desc)
+  where deleted_at is null;
+
+revoke all on table derived_data_bars from public;
+revoke all on table derived_data_bars from anon;
+revoke all on table derived_data_bars from authenticated;
+
+-- =========================
+-- 2) Extend data_agg_state (keep existing columns)
+-- =========================
+alter table data_agg_state
+  add column if not exists run_interval_minutes integer,
+  add column if not exists aggregation_delay_seconds integer,
+  add column if not exists source_timeframe text,
+  add column if not exists is_mandatory boolean not null default false,
+  add column if not exists next_run_at timestamptz,
+  add column if not exists running_started_at_utc timestamptz,
+  add column if not exists total_runs bigint not null default 0,
+  add column if not exists total_bars_created bigint not null default 0,
+  add column if not exists total_bars_quality_poor bigint not null default 0;
+
+alter table data_agg_state
+  alter column status set default 'idle';
+
+create index if not exists idx_agg_state_due
+  on data_agg_state (next_run_at)
+  where status='idle';
+
+-- =========================
+-- 3) ops_runlog (timeline checkpoints, keep last 10)
+-- =========================
+create table if not exists ops_runlog (
+  id bigserial primary key,
+  run_id uuid not null,
+  job_name text not null,
+  trigger text not null, -- cron|manual
+  env_name text,
+  started_at timestamptz not null default now(),
+  finished_at timestamptz,
+  status text not null default 'running', -- running|success|failed
+  checkpoints jsonb not null default '{}'::jsonb,
+  events jsonb not null default '[]'::jsonb,
+  stats jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_ops_runlog_job_trigger_started
+  on ops_runlog (job_name, trigger, started_at desc);
+
+revoke all on table ops_runlog from public;
+revoke all on table ops_runlog from anon;
+revoke all on table ops_runlog from authenticated;
+
+-- =========================
+-- 4) updated_at helper trigger
+-- =========================
+create or replace function _set_updated_at()
+returns trigger language plpgsql as $$
+begin
+  new.updated_at = now();
+  return new;
+end $$;
+
+do $$
+begin
+  if not exists (select 1 from pg_trigger where tgname='trg_derived_updated_at') then
+    create trigger trg_derived_updated_at
+      before update on derived_data_bars
+      for each row execute function _set_updated_at();
+  end if;
+
+  if not exists (select 1 from pg_trigger where tgname='trg_agg_state_updated_at') then
+    create trigger trg_agg_state_updated_at
+      before update on data_agg_state
+      for each row execute function _set_updated_at();
+  end if;
+end $$;
+
+-- =========================
+-- 5) ops_runlog RPCs
+-- =========================
+create or replace function ops_runlog_start(p_run_id uuid, p_job_name text, p_trigger text, p_env_name text)
+returns jsonb language plpgsql security definer set search_path=public as $$
+begin
+  insert into ops_runlog (run_id, job_name, trigger, env_name, status)
+  values (p_run_id, p_job_name, p_trigger, p_env_name, 'running')
+  on conflict do nothing;
+  return jsonb_build_object('success', true);
+end $$;
+
+create or replace function ops_runlog_checkpoint(p_run_id uuid, p_checkpoint text, p_details jsonb default '{}'::jsonb)
+returns jsonb language plpgsql security definer set search_path=public as $$
+declare v_evt jsonb;
+begin
+  v_evt := jsonb_build_object('ts', now(), 'checkpoint', p_checkpoint, 'details', coalesce(p_details,'{}'::jsonb));
+  update ops_runlog
+  set checkpoints = checkpoints || jsonb_build_object(p_checkpoint,true),
+      events = events || jsonb_build_array(v_evt)
+  where run_id = p_run_id;
+  return jsonb_build_object('success', true);
+end $$;
+
+create or replace function ops_runlog_finish(p_run_id uuid, p_status text, p_stats jsonb default '{}'::jsonb)
+returns jsonb language plpgsql security definer set search_path=public as $$
+begin
+  update ops_runlog set finished_at=now(), status=p_status, stats=coalesce(p_stats,'{}'::jsonb)
+  where run_id=p_run_id;
+  return jsonb_build_object('success', true);
+end $$;
+
+create or replace function ops_runlog_prune(p_job_name text, p_trigger text, p_keep int default 10)
+returns jsonb language plpgsql security definer set search_path=public as $$
+declare v_deleted int;
+begin
+  with ranked as (
+    select id, row_number() over (partition by job_name, trigger order by started_at desc) rn
+    from ops_runlog
+    where job_name=p_job_name and trigger=p_trigger
+  )
+  delete from ops_runlog where id in (select id from ranked where rn > p_keep);
+
+  get diagnostics v_deleted = row_count;
+  return jsonb_build_object('success', true, 'deleted', v_deleted);
+end $$;
+
+revoke execute on function ops_runlog_start(uuid,text,text,text) from public;
+revoke execute on function ops_runlog_checkpoint(uuid,text,jsonb) from public;
+revoke execute on function ops_runlog_finish(uuid,text,jsonb) from public;
+revoke execute on function ops_runlog_prune(text,text,int) from public;
+
+grant execute on function ops_runlog_start(uuid,text,text,text) to service_role;
+grant execute on function ops_runlog_checkpoint(uuid,text,jsonb) to service_role;
+grant execute on function ops_runlog_finish(uuid,text,jsonb) to service_role;
+grant execute on function ops_runlog_prune(text,text,int) to service_role;
+
+-- =========================
+-- 6) agg_get_due_tasks (env-aware)
+-- =========================
+create or replace function agg_get_due_tasks(
+  p_env_name text,
+  p_now_utc timestamptz default now(),
+  p_limit int default 20,
+  p_running_stale_seconds int default 900
+)
+returns table (
+  canonical_symbol text,
+  timeframe text,
+  source_timeframe text,
+  run_interval_minutes int,
+  aggregation_delay_seconds int,
+  last_agg_bar_ts_utc timestamptz,
+  status text,
+  hard_fail_streak int
+)
+language plpgsql security definer set search_path=public as $$
+begin
+  -- recover stale running tasks
+  update data_agg_state
+  set status='idle',
+      running_started_at_utc=null,
+      last_error=left(coalesce(last_error,'') || ' | stale_running_recovered', 2000),
+      updated_at=now()
+  where status='running'
+    and running_started_at_utc is not null
+    and running_started_at_utc < (p_now_utc - make_interval(secs => p_running_stale_seconds));
+
+  return query
+  select s.canonical_symbol, s.timeframe, s.source_timeframe, s.run_interval_minutes,
+         s.aggregation_delay_seconds, s.last_agg_bar_ts_utc, s.status, s.hard_fail_streak
+  from data_agg_state s
+  join core_asset_registry_all a on a.canonical_symbol = s.canonical_symbol
+  where s.status='idle'
+    and coalesce(s.next_run_at, p_now_utc) <= p_now_utc
+    and (
+      (upper(p_env_name) in ('DEV','TEST') and a.test_active=true)
+      or
+      (upper(p_env_name) not in ('DEV','TEST') and a.active=true)
+    )
+  order by coalesce(s.next_run_at, p_now_utc) asc
+  limit p_limit;
+end $$;
+
+revoke execute on function agg_get_due_tasks(text,timestamptz,int,int) from public;
+grant execute on function agg_get_due_tasks(text,timestamptz,int,int) to service_role;
+
+-- =========================
+-- 7) agg_start / agg_finish (FSM + auto-disable)
+-- =========================
+create or replace function agg_start(p_symbol text, p_tf text, p_now_utc timestamptz default now())
+returns jsonb language plpgsql security definer set search_path=public as $$
+declare v_row data_agg_state%rowtype;
+begin
+  update data_agg_state
+  set status='running',
+      running_started_at_utc=p_now_utc,
+      last_attempted_at_utc=p_now_utc,
+      updated_at=now()
+  where canonical_symbol=p_symbol and timeframe=p_tf and status='idle'
+  returning * into v_row;
+
+  if not found then
+    return jsonb_build_object('success', false, 'error', 'not_idle_or_missing');
+  end if;
+
+  return jsonb_build_object(
+    'success', true,
+    'canonical_symbol', v_row.canonical_symbol,
+    'timeframe', v_row.timeframe,
+    'source_timeframe', v_row.source_timeframe,
+    'run_interval_minutes', v_row.run_interval_minutes,
+    'aggregation_delay_seconds', v_row.aggregation_delay_seconds,
+    'last_agg_bar_ts_utc', v_row.last_agg_bar_ts_utc
+  );
+end $$;
+
+create or replace function agg_finish(
+  p_symbol text,
+  p_tf text,
+  p_success boolean,
+  p_new_cursor_utc timestamptz default null,
+  p_fail_kind text default null, -- transient|hard
+  p_error text default null,
+  p_stats jsonb default '{}'::jsonb,
+  p_now_utc timestamptz default now(),
+  p_auto_disable_hard_fail_threshold int default 3
+)
+returns jsonb language plpgsql security definer set search_path=public as $$
+declare
+  v_next_run timestamptz;
+  v_err text;
+  v_bars_created int := coalesce((p_stats->>'bars_created')::int,0);
+  v_bars_poor int := coalesce((p_stats->>'bars_quality_poor')::int,0);
+  v_status text;
+  v_streak int;
+begin
+  select p_now_utc + make_interval(mins => run_interval_minutes)
+    into v_next_run
+  from data_agg_state
+  where canonical_symbol=p_symbol and timeframe=p_tf;
+
+  v_err := coalesce(p_error,'unknown');
+  if length(v_err) > 1900 then v_err := left(v_err,1900) || '... [truncated]'; end if;
+
+  if p_success then
+    update data_agg_state
+    set status='idle',
+        running_started_at_utc=null,
+        last_successful_at_utc=p_now_utc,
+        last_error=null,
+        hard_fail_streak=0,
+        last_agg_bar_ts_utc=coalesce(p_new_cursor_utc,last_agg_bar_ts_utc),
+        next_run_at=v_next_run,
+        total_runs=total_runs+1,
+        total_bars_created=total_bars_created+v_bars_created,
+        total_bars_quality_poor=total_bars_quality_poor+v_bars_poor,
+        updated_at=now()
+    where canonical_symbol=p_symbol and timeframe=p_tf;
+    return jsonb_build_object('success', true);
+  end if;
+
+  if coalesce(p_fail_kind,'hard')='transient' then
+    update data_agg_state
+    set status='idle',
+        running_started_at_utc=null,
+        last_error=v_err,
+        next_run_at=v_next_run,
+        total_runs=total_runs+1,
+        updated_at=now()
+    where canonical_symbol=p_symbol and timeframe=p_tf;
+    return jsonb_build_object('success', true, 'failed', true, 'kind', 'transient');
+  end if;
+
+  update data_agg_state
+  set hard_fail_streak=coalesce(hard_fail_streak,0)+1,
+      last_error=v_err,
+      status=case when (coalesce(hard_fail_streak,0)+1) >= p_auto_disable_hard_fail_threshold then 'disabled' else 'idle' end,
+      running_started_at_utc=null,
+      next_run_at=v_next_run,
+      total_runs=total_runs+1,
+      updated_at=now()
+  where canonical_symbol=p_symbol and timeframe=p_tf
+  returning status, hard_fail_streak into v_status, v_streak;
+
+  return jsonb_build_object('success', true, 'failed', true, 'kind', 'hard', 'status', v_status, 'hard_fail_streak', v_streak);
+end $$;
+
+revoke execute on function agg_start(text,text,timestamptz) from public;
+revoke execute on function agg_finish(text,text,boolean,timestamptz,text,text,jsonb,timestamptz,int) from public;
+grant execute on function agg_start(text,text,timestamptz) to service_role;
+grant execute on function agg_finish(text,text,boolean,timestamptz,text,text,jsonb,timestamptz,int) to service_role;
+
+-- =========================
+-- 8) agg_bootstrap_cursor (boundary - interval)
+-- =========================
+create or replace function agg_bootstrap_cursor(p_symbol text, p_to_tf text, p_now_utc timestamptz default now())
+returns timestamptz language plpgsql security definer set search_path=public as $$
+declare
+  v_interval_min int;
+  v_src_tf text;
+  v_latest timestamptz;
+  v_latest_ms bigint;
+  v_interval_ms bigint;
+  v_boundary_ms bigint;
+begin
+  select run_interval_minutes, source_timeframe into v_interval_min, v_src_tf
+  from data_agg_state
+  where canonical_symbol=p_symbol and timeframe=p_to_tf;
+
+  if v_interval_min is null or v_src_tf is null then
+    raise exception 'Missing config in data_agg_state for %/%', p_symbol, p_to_tf;
+  end if;
+
+  select max(ts_utc) into v_latest
+  from (
+    select ts_utc from data_bars where canonical_symbol=p_symbol and timeframe=v_src_tf
+    union all
+    select ts_utc from derived_data_bars where canonical_symbol=p_symbol and timeframe=v_src_tf and deleted_at is null
+  ) x;
+
+  v_interval_ms := v_interval_min::bigint * 60000;
+
+  if v_latest is null then
+    -- no data: next boundary
+    v_latest_ms := floor(extract(epoch from p_now_utc) * 1000)::bigint;
+    v_boundary_ms := (v_latest_ms / v_interval_ms) * v_interval_ms;
+    return to_timestamp((v_boundary_ms + v_interval_ms) / 1000.0)::timestamptz;
+  end if;
+
+  v_latest_ms := floor(extract(epoch from v_latest) * 1000)::bigint;
+  v_boundary_ms := (v_latest_ms / v_interval_ms) * v_interval_ms;
+
+  return to_timestamp((v_boundary_ms - v_interval_ms) / 1000.0)::timestamptz;
+end $$;
+
+revoke execute on function agg_bootstrap_cursor(text,text,timestamptz) from public;
+grant execute on function agg_bootstrap_cursor(text,text,timestamptz) to service_role;
+
+-- =========================
+-- 9) Aggregation RPCs: 1m->5m and 5m->1h (single window)
+-- =========================
+create or replace function _upsert_derived_bar(
+  p_symbol text, p_tf text, p_ts timestamptz,
+  p_open double precision, p_high double precision, p_low double precision, p_close double precision,
+  p_vol double precision, p_vwap double precision, p_trade_count integer,
+  p_source text, p_source_tf text, p_source_candles integer, p_expected_candles integer,
+  p_quality_score integer, p_derivation_version integer, p_raw jsonb
+)
+returns jsonb language plpgsql security definer set search_path=public as $$
+declare v_inserted boolean;
+begin
+  insert into derived_data_bars (
+    canonical_symbol,timeframe,ts_utc,open,high,low,close,vol,vwap,trade_count,
+    is_partial,source,ingested_at,source_timeframe,source_candles,expected_candles,quality_score,
+    derivation_version,raw,deleted_at
+  )
+  values (
+    p_symbol,p_tf,p_ts,p_open,p_high,p_low,p_close,p_vol,p_vwap,p_trade_count,
+    false,p_source,now(),p_source_tf,p_source_candles,p_expected_candles,p_quality_score,
+    p_derivation_version,coalesce(p_raw,'{}'::jsonb),null
+  )
+  on conflict (canonical_symbol,timeframe,ts_utc) where (deleted_at is null)
+  do update set
+    open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close,
+    vol=excluded.vol, vwap=excluded.vwap, trade_count=excluded.trade_count,
+    source=excluded.source, ingested_at=excluded.ingested_at,
+    source_timeframe=excluded.source_timeframe, source_candles=excluded.source_candles,
+    expected_candles=excluded.expected_candles, quality_score=excluded.quality_score,
+    derivation_version=excluded.derivation_version, raw=excluded.raw,
+    updated_at=now()
+  returning (xmax=0) into v_inserted;
+
+  return jsonb_build_object('success',true,'inserted',coalesce(v_inserted,false));
+end $$;
+
+revoke execute on function _upsert_derived_bar(text,text,timestamptz,double precision,double precision,double precision,double precision,double precision,double precision,integer,text,text,integer,integer,integer,integer,jsonb) from public;
+grant execute on function _upsert_derived_bar(text,text,timestamptz,double precision,double precision,double precision,double precision,double precision,double precision,integer,text,text,integer,integer,integer,integer,jsonb) to service_role;
+
+-- 1m->5m quality: 5=>2, 4=>1, 3=>0, <3 skip
+create or replace function aggregate_1m_to_5m_window(p_symbol text, p_from_utc timestamptz, p_to_utc timestamptz, p_derivation_version int default 1)
+returns jsonb language plpgsql security definer set search_path=public as $$
+declare
+  v_cnt int; v_o double precision; v_c double precision; v_h double precision; v_l double precision;
+  v_vol double precision; v_vwap double precision; v_tc int; v_q int;
+begin
+  if p_to_utc <= p_from_utc then raise exception 'Invalid window'; end if;
+
+  with src as (
+    select ts_utc,open,high,low,close,vol,vwap,trade_count from data_bars
+      where canonical_symbol=p_symbol and timeframe='1m' and ts_utc>=p_from_utc and ts_utc<p_to_utc
+    union all
+    select ts_utc,open,high,low,close,vol,vwap,trade_count from derived_data_bars
+      where canonical_symbol=p_symbol and timeframe='1m' and deleted_at is null and ts_utc>=p_from_utc and ts_utc<p_to_utc
+  ),
+  ordered as (select * from src order by ts_utc asc),
+  agg as (
+    select count(*) cnt,
+      (array_agg(open order by ts_utc asc))[1] o,
+      (array_agg(close order by ts_utc asc))[count(*)] c,
+      max(high) h, min(low) l,
+      sum(coalesce(vol,0)) vol_sum,
+      case when sum(coalesce(vol,0))>0
+        then sum(coalesce(vwap,0)*coalesce(vol,0))/nullif(sum(coalesce(vol,0)),0) else null end vwap_calc,
+      sum(coalesce(trade_count,0))::int tc_sum
+    from ordered
+  )
+  select cnt,o,c,h,l,vol_sum,vwap_calc,tc_sum into v_cnt,v_o,v_c,v_h,v_l,v_vol,v_vwap,v_tc from agg;
+
+  if v_cnt>=5 then v_q:=2;
+  elsif v_cnt=4 then v_q:=1;
+  elsif v_cnt=3 then v_q:=0;
+  else return jsonb_build_object('success',true,'stored',false,'reason','insufficient_source_bars','source_count',v_cnt); end if;
+
+  perform _upsert_derived_bar(
+    p_symbol,'5m',p_from_utc,v_o,v_h,v_l,v_c,v_vol,v_vwap,v_tc,
+    'agg','1m',v_cnt,5,v_q,p_derivation_version,
+    jsonb_build_object('from',p_from_utc,'to',p_to_utc,'source','union(raw1m,derived1m)')
+  );
+
+  return jsonb_build_object('success',true,'stored',true,'source_count',v_cnt,'quality_score',v_q);
+end $$;
+
+revoke execute on function aggregate_1m_to_5m_window(text,timestamptz,timestamptz,int) from public;
+grant execute on function aggregate_1m_to_5m_window(text,timestamptz,timestamptz,int) to service_role;
+
+-- 5m->1h quality: 12=>2, 10-11=>1, 8-9=>0, 7=>-1, <7 skip
+create or replace function aggregate_5m_to_1h_window(p_symbol text, p_from_utc timestamptz, p_to_utc timestamptz, p_derivation_version int default 1)
+returns jsonb language plpgsql security definer set search_path=public as $$
+declare
+  v_cnt int; v_o double precision; v_c double precision; v_h double precision; v_l double precision;
+  v_vol double precision; v_vwap double precision; v_tc int; v_q int;
+begin
+  if p_to_utc <= p_from_utc then raise exception 'Invalid window'; end if;
+
+  with src as (
+    select ts_utc,open,high,low,close,vol,vwap,trade_count
+    from derived_data_bars
+    where canonical_symbol=p_symbol and timeframe='5m' and deleted_at is null
+      and ts_utc>=p_from_utc and ts_utc<p_to_utc
+  ),
+  ordered as (select * from src order by ts_utc asc),
+  agg as (
+    select count(*) cnt,
+      (array_agg(open order by ts_utc asc))[1] o,
+      (array_agg(close order by ts_utc asc))[count(*)] c,
+      max(high) h, min(low) l,
+      sum(coalesce(vol,0)) vol_sum,
+      case when sum(coalesce(vol,0))>0
+        then sum(coalesce(vwap,0)*coalesce(vol,0))/nullif(sum(coalesce(vol,0)),0) else null end vwap_calc,
+      sum(coalesce(trade_count,0))::int tc_sum
+    from ordered
+  )
+  select cnt,o,c,h,l,vol_sum,vwap_calc,tc_sum into v_cnt,v_o,v_c,v_h,v_l,v_vol,v_vwap,v_tc from agg;
+
+  if v_cnt=12 then v_q:=2;
+  elsif v_cnt in (10,11) then v_q:=1;
+  elsif v_cnt in (8,9) then v_q:=0;
+  elsif v_cnt=7 then v_q:=-1;
+  else return jsonb_build_object('success',true,'stored',false,'reason','insufficient_source_bars','source_count',v_cnt); end if;
+
+  perform _upsert_derived_bar(
+    p_symbol,'1h',p_from_utc,v_o,v_h,v_l,v_c,v_vol,v_vwap,v_tc,
+    'agg','5m',v_cnt,12,v_q,p_derivation_version,
+    jsonb_build_object('from',p_from_utc,'to',p_to_utc,'source','derived5m')
+  );
+
+  return jsonb_build_object('success',true,'stored',true,'source_count',v_cnt,'quality_score',v_q);
+end $$;
+
+revoke execute on function aggregate_5m_to_1h_window(text,timestamptz,timestamptz,int) from public;
+grant execute on function aggregate_5m_to_1h_window(text,timestamptz,timestamptz,int) to service_role;
+
+-- =========================
+-- 10) DXY derivation -> derived_data_bars (strict completeness)
+-- =========================
+create or replace function calc_dxy_range_derived(p_from_utc timestamptz, p_to_utc timestamptz, p_tf text default '1m', p_derivation_version int default 1)
+returns jsonb language plpgsql security definer set search_path=public as $$
+declare v_inserted int:=0; v_updated int:=0; v_skipped int:=0;
+begin
+  if p_tf <> '1m' then raise exception 'DXY locked to 1m only'; end if;
+
+  with base as (
+    select ts_utc
+    from data_bars
+    where timeframe='1m' and ts_utc>=p_from_utc and ts_utc<p_to_utc
+      and canonical_symbol in ('EURUSD','USDJPY','GBPUSD','USDCAD','USDSEK','USDCHF')
+    group by ts_utc
+  ),
+  c as (
+    select b.ts_utc,
+      max(close) filter (where canonical_symbol='EURUSD') as eurusd,
+      max(close) filter (where canonical_symbol='USDJPY') as usdjpy,
+      max(close) filter (where canonical_symbol='GBPUSD') as gbpusd,
+      max(close) filter (where canonical_symbol='USDCAD') as usdcad,
+      max(close) filter (where canonical_symbol='USDSEK') as usdsek,
+      max(close) filter (where canonical_symbol='USDCHF') as usdchf
+    from base b join data_bars d on d.ts_utc=b.ts_utc and d.timeframe='1m'
+      and d.canonical_symbol in ('EURUSD','USDJPY','GBPUSD','USDCAD','USDSEK','USDCHF')
+    group by b.ts_utc
+  ),
+  valid as (
+    select * from c
+    where eurusd>0 and usdjpy>0 and gbpusd>0 and usdcad>0 and usdsek>0 and usdchf>0
+  ),
+  dxy as (
+    select ts_utc,
+      (50.14348112
+        * exp(-0.576 * ln(eurusd))
+        * exp( 0.136 * ln(usdjpy))
+        * exp(-0.119 * ln(gbpusd))
+        * exp( 0.091 * ln(usdcad))
+        * exp( 0.042 * ln(usdsek))
+        * exp( 0.036 * ln(usdchf))
+      ) as dxy_close
+    from valid
+  ),
+  up as (
+    insert into derived_data_bars (
+      canonical_symbol,timeframe,ts_utc,
+      open,high,low,close,
+      vol,vwap,trade_count,
+      is_partial,source,ingested_at,
+      source_timeframe,source_candles,expected_candles,quality_score,
+      derivation_version,raw,deleted_at
+    )
+    select 'DXY','1m',ts_utc,
+      dxy_close,dxy_close,dxy_close,dxy_close,
+      0,null,null,false,'dxy',now(),
+      '1m',6,6,2,p_derivation_version,
+      jsonb_build_object('kind','dxy','formula','standard'),null
+    from dxy
+    on conflict (canonical_symbol,timeframe,ts_utc) where (deleted_at is null)
+    do update set close=excluded.close, open=excluded.open, high=excluded.high, low=excluded.low,
+      derivation_version=excluded.derivation_version, raw=excluded.raw, updated_at=now()
+    returning (xmax=0) inserted
+  )
+  select count(*) filter (where inserted), count(*) filter (where not inserted) into v_inserted,v_updated from up;
+
+  select count(*) into v_skipped from (select ts_utc from base except select ts_utc from valid) s;
+
+  return jsonb_build_object('success',true,'inserted',coalesce(v_inserted,0),'updated',coalesce(v_updated,0),'skipped_incomplete',coalesce(v_skipped,0));
+end $$;
+
+revoke execute on function calc_dxy_range_derived(timestamptz,timestamptz,text,int) from public;
+grant execute on function calc_dxy_range_derived(timestamptz,timestamptz,text,int) to service_role;
+
+-- =========================
+-- 11) Admin Pack v1
+-- =========================
+create or replace function derived_soft_delete_range(p_symbol text, p_tf text, p_from_utc timestamptz, p_to_utc timestamptz, p_reason text default null)
+returns jsonb language plpgsql security definer set search_path=public as $$
+declare v_rows int;
+begin
+  update derived_data_bars
+  set deleted_at=now(),
+      raw = raw || jsonb_build_object('soft_delete', jsonb_build_object('at', now(), 'reason', p_reason)),
+      updated_at=now()
+  where canonical_symbol=p_symbol and timeframe=p_tf
+    and ts_utc>=p_from_utc and ts_utc<p_to_utc
+    and deleted_at is null;
+
+  get diagnostics v_rows = row_count;
+  return jsonb_build_object('success',true,'soft_deleted_rows',v_rows);
+end $$;
+
+-- bounded multi-window catchup; can ignore confirmation delays
+create or replace function catchup_aggregation_range(
+  p_symbol text,
+  p_to_tf text,                 -- 5m or 1h
+  p_start_cursor_utc timestamptz,
+  p_max_windows integer default 100,
+  p_now_utc timestamptz default null,
+  p_derivation_version int default 1,
+  p_ignore_confirmation boolean default false
+)
+returns jsonb language plpgsql security definer set search_path=public as $$
+declare
+  v_now timestamptz := coalesce(p_now_utc, now());
+  v_interval_min int; v_delay_sec int;
+  v_cursor timestamptz := p_start_cursor_utc;
+  v_ws timestamptz; v_we timestamptz; v_confirm timestamptz;
+  v_processed int:=0; v_created int:=0; v_poor int:=0; v_skipped int:=0;
+  v_res jsonb; v_stored boolean; v_q int;
+begin
+  select run_interval_minutes, aggregation_delay_seconds into v_interval_min, v_delay_sec
+  from data_agg_state where canonical_symbol=p_symbol and timeframe=p_to_tf;
+
+  if v_interval_min is null then raise exception 'Missing agg config %/%', p_symbol, p_to_tf; end if;
+
+  while v_processed < p_max_windows loop
+    v_ws := v_cursor;
+    v_we := v_ws + make_interval(mins => v_interval_min);
+    v_confirm := v_we + make_interval(secs => v_delay_sec);
+
+    if (not p_ignore_confirmation) and v_now < v_confirm then exit; end if;
+
+    if p_to_tf='5m' then
+      v_res := aggregate_1m_to_5m_window(p_symbol, v_ws, v_we, p_derivation_version);
+    elsif p_to_tf='1h' then
+      v_res := aggregate_5m_to_1h_window(p_symbol, v_ws, v_we, p_derivation_version);
+    else
+      raise exception 'Unsupported tf=%', p_to_tf;
+    end if;
+
+    v_stored := coalesce((v_res->>'stored')::boolean,false);
+    if v_stored then
+      v_created := v_created + 1;
+      v_q := (v_res->>'quality_score')::int;
+      if v_q <= 0 then v_poor := v_poor + 1; end if;
+    else
+      v_skipped := v_skipped + 1;
+    end if;
+
+    v_cursor := v_we;
+    v_processed := v_processed + 1;
+  end loop;
+
+  return jsonb_build_object(
+    'success',true,
+    'windows_processed',v_processed,
+    'cursor_advanced_to',v_cursor,
+    'bars_created',v_created,
+    'bars_quality_poor',v_poor,
+    'bars_skipped',v_skipped,
+    'continue',(v_processed=p_max_windows)
+  );
+end $$;
+
+-- rebuild = soft-delete + recompute; ignores confirmation delays
+create or replace function derived_rebuild_range(
+  p_symbol text,
+  p_tf text,                         -- 5m or 1h
+  p_from_utc timestamptz,
+  p_to_utc timestamptz,
+  p_bump_derivation_version boolean default true,
+  p_reason text default null,
+  p_max_windows integer default 500
+)
+returns jsonb language plpgsql security definer set search_path=public as $$
+declare
+  v_version int := 1;
+  v_cursor timestamptz := p_from_utc;
+  v_deleted jsonb;
+  v_catch jsonb;
+begin
+  if p_to_utc <= p_from_utc then raise exception 'Invalid range'; end if;
+
+  if p_bump_derivation_version then
+    select coalesce(max(derivation_version),0)+1 into v_version
+    from derived_data_bars where canonical_symbol=p_symbol and timeframe=p_tf;
+  end if;
+
+  v_deleted := derived_soft_delete_range(p_symbol,p_tf,p_from_utc,p_to_utc,p_reason);
+
+  while v_cursor < p_to_utc loop
+    v_catch := catchup_aggregation_range(p_symbol,p_tf,v_cursor,p_max_windows,now(),v_version,true);
+    v_cursor := (v_catch->>'cursor_advanced_to')::timestamptz;
+    if coalesce((v_catch->>'windows_processed')::int,0)=0 then exit; end if;
+  end loop;
+
+  return jsonb_build_object('success',true,'derivation_version',v_version,'soft_delete',v_deleted);
+end $$;
+
+revoke execute on function derived_soft_delete_range(text,text,timestamptz,timestamptz,text) from public;
+revoke execute on function catchup_aggregation_range(text,text,timestamptz,integer,timestamptz,int,boolean) from public;
+revoke execute on function derived_rebuild_range(text,text,timestamptz,timestamptz,boolean,text,integer) from public;
+
+grant execute on function derived_soft_delete_range(text,text,timestamptz,timestamptz,text) to service_role;
+grant execute on function catchup_aggregation_range(text,text,timestamptz,integer,timestamptz,int,boolean) to service_role;
+grant execute on function derived_rebuild_range(text,text,timestamptz,timestamptz,boolean,text,integer) to service_role;
+
+commit;

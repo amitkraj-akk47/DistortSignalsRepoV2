@@ -116,6 +116,13 @@ interface IngestFinishResult {
   fail_kind?: string;
 }
 
+interface DxyDerivedResult {
+  success: boolean;
+  inserted?: number;
+  updated?: number;
+  skipped_incomplete?: number;
+}
+
 interface FetchRetryResult {
   ok: boolean;
   status: number | "ERR";
@@ -1008,6 +1015,16 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
     counts.subrequests += n;
   };
 
+  // Track FX pairs for DXY derivation
+  const FX_PAIRS_FOR_DXY = new Set(['EURUSD', 'USDJPY', 'GBPUSD', 'USDCAD', 'USDSEK', 'USDCHF']);
+  const fxWindowsIngested: Map<string, Set<string>> = new Map(); // window_key -> Set<symbol>
+  let dxyDerivedCount = 0;
+  let dxyFailedCount = 0;
+
+  const makeWindowKey = (from: Date, to: Date): string => {
+    return `${toIso(from)}|${toIso(to)}`;
+  };
+
   try {
     log.setPhase("LOAD_DATA");
     const gatingFilter = activeField === "active" ? "active=eq.true" : "test_active=eq.true";
@@ -1448,6 +1465,77 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
         updated: upsertResult?.updated ?? 0,
         newCursor,
       });
+
+      // ====== DXY DERIVATION: Track FX ingestion ======
+      if (FX_PAIRS_FOR_DXY.has(canonical) && tf === '1m' && barRows.length > 0) {
+        const windowKey = makeWindowKey(fromTs, safeTo);
+        
+        if (!fxWindowsIngested.has(windowKey)) {
+          fxWindowsIngested.set(windowKey, new Set());
+        }
+        fxWindowsIngested.get(windowKey)!.add(canonical);
+        
+        const ingestedForWindow = fxWindowsIngested.get(windowKey)!;
+        log.debug("DXY_TRACK", `FX pair ingested for window`, { 
+          symbol: canonical, 
+          window: windowKey,
+          count: ingestedForWindow.size,
+          pairs: Array.from(ingestedForWindow).sort() 
+        });
+        
+        // Check if we have all 6 FX pairs for this window
+        if (ingestedForWindow.size === 6) {
+          log.info("DXY_DERIVE_START", `All 6 FX pairs ready - deriving DXY`, { 
+            window: windowKey,
+            pairs: Array.from(ingestedForWindow).sort() 
+          });
+          
+          try {
+            const dxyResult = await supa.rpc<DxyDerivedResult>("calc_dxy_range_derived", {
+              p_from_utc: toIso(fromTs),
+              p_to_utc: toIso(safeTo),
+              p_tf: "1m",
+              p_derivation_version: 1,
+            });
+            trackSubrequest();
+            
+            if (dxyResult?.success) {
+              dxyDerivedCount++;
+              log.info("DXY_DERIVE_SUCCESS", `DXY derived successfully`, {
+                window: windowKey,
+                inserted: dxyResult.inserted || 0,
+                updated: dxyResult.updated || 0,
+                skipped: dxyResult.skipped_incomplete || 0,
+              });
+            } else {
+              dxyFailedCount++;
+              log.warn("DXY_DERIVE_WARN", `DXY derivation returned success=false`, { 
+                window: windowKey 
+              });
+            }
+          } catch (e: any) {
+            dxyFailedCount++;
+            const errMsg = e instanceof Error ? e.message : String(e);
+            log.warn("DXY_DERIVE_ERROR", `DXY derivation failed (non-fatal)`, { 
+              window: windowKey,
+              error: errMsg 
+            });
+            
+            // Create issue for tracking
+            await opsUpsertIssueBestEffort(supa, issuesOn, {
+              severity_level: 2,
+              issue_type: "DXY_DERIVATION_FAILED",
+              source_system: "ingestion",
+              canonical_symbol: "DXY",
+              component: "dxy_derivation",
+              summary: `DXY derivation failed for window ${windowKey}`,
+              description: errMsg,
+              metadata: { window: windowKey, error: errMsg },
+              related_job_run_id: runId,
+            });
+          }
+        }
+      }
       
       await sleep(100 + jitter(150));
     }
@@ -1480,6 +1568,18 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
       rows_rejected: counts.rows_rejected,
       http_429_count: counts.http_429,
     });
+    
+    // DXY derivation summary
+    const totalDxyWindows = Array.from(fxWindowsIngested.values()).filter(s => s.size === 6).length;
+    if (totalDxyWindows > 0 || fxWindowsIngested.size > 0) {
+      log.info("DXY", `DXY: ${dxyDerivedCount} derived, ${dxyFailedCount} failed, ${totalDxyWindows}/${fxWindowsIngested.size} complete windows`, {
+        derived: dxyDerivedCount,
+        failed: dxyFailedCount,
+        complete_windows: totalDxyWindows,
+        total_windows: fxWindowsIngested.size,
+      });
+    }
+    
     log.logTimingSummary();
     if (Object.keys(counts.skip_reasons).length > 0) {
       log.info("SKIP_REASONS", "Skip breakdown", counts.skip_reasons);

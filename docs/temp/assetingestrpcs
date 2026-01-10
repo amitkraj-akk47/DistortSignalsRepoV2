@@ -97,12 +97,17 @@ DECLARE
   v_end_ts   timestamptz;
 
   v_rejected integer := 0;
-  v_reject_samples jsonb := '[]'::jsonb; -- small sample of rejected rows (capped)
+  v_reject_samples jsonb := '[]'::jsonb;
 BEGIN
+  -- FIX #2: Safe input_count for non-array values
   IF p_bars IS NULL OR jsonb_typeof(p_bars) <> 'array' OR jsonb_array_length(p_bars) = 0 THEN
     RETURN jsonb_build_object(
       'success', true,
-      'input_count', COALESCE(jsonb_array_length(p_bars), 0),
+      'input_count', CASE 
+        WHEN p_bars IS NULL THEN 0
+        WHEN jsonb_typeof(p_bars) = 'array' THEN jsonb_array_length(p_bars)
+        ELSE 0
+      END,
       'upserted_total', 0,
       'inserted', 0,
       'updated', 0,
@@ -121,6 +126,7 @@ BEGIN
     - high >= low, high >= open/close, low <= open/close
     - vol must be numeric and >= 0 (null allowed -> default 0)
     - For DXY: open/high/low/close must be > 0 (prevents downstream calc errors)
+    - For DXY basket currencies: close must be > 0 (prevents exponent math errors)
   */
 
   WITH
@@ -138,30 +144,81 @@ BEGIN
       NULLIF(btrim(bar->>'provider_ticker'), '')  AS provider_ticker,
       NULLIF(btrim(bar->>'timeframe'), '')        AS timeframe,
 
-      (bar->>'ts_utc')::timestamptz               AS ts_utc,
+      -- FIX #3: Safe timestamp cast
+      CASE 
+        WHEN bar->>'ts_utc' IS NULL THEN NULL
+        WHEN bar->>'ts_utc' ~ '^\d{4}-\d{2}-\d{2}' THEN (bar->>'ts_utc')::timestamptz
+        ELSE NULL
+      END AS ts_utc,
 
-      NULLIF(bar->>'open','')::numeric            AS open,
-      NULLIF(bar->>'high','')::numeric            AS high,
-      NULLIF(bar->>'low','')::numeric             AS low,
-      NULLIF(bar->>'close','')::numeric           AS close,
+      -- FIX #3: Safe numeric casts for OHLC
+      CASE 
+        WHEN NULLIF(bar->>'open','') ~ '^-?[0-9]+\.?[0-9]*([eE][+-]?[0-9]+)?$' 
+        THEN NULLIF(bar->>'open','')::numeric 
+        ELSE NULL 
+      END AS open,
+      
+      CASE 
+        WHEN NULLIF(bar->>'high','') ~ '^-?[0-9]+\.?[0-9]*([eE][+-]?[0-9]+)?$' 
+        THEN NULLIF(bar->>'high','')::numeric 
+        ELSE NULL 
+      END AS high,
+      
+      CASE 
+        WHEN NULLIF(bar->>'low','') ~ '^-?[0-9]+\.?[0-9]*([eE][+-]?[0-9]+)?$' 
+        THEN NULLIF(bar->>'low','')::numeric 
+        ELSE NULL 
+      END AS low,
+      
+      CASE 
+        WHEN NULLIF(bar->>'close','') ~ '^-?[0-9]+\.?[0-9]*([eE][+-]?[0-9]+)?$' 
+        THEN NULLIF(bar->>'close','')::numeric 
+        ELSE NULL 
+      END AS close,
 
-      NULLIF(bar->>'vol','')::numeric             AS vol,
-      NULLIF(bar->>'vwap','')::numeric            AS vwap,
-      NULLIF(bar->>'trade_count','')::integer     AS trade_count,
+      -- FIX #3: Safe numeric casts for optional fields
+      CASE 
+        WHEN NULLIF(bar->>'vol','') ~ '^-?[0-9]+\.?[0-9]*([eE][+-]?[0-9]+)?$' 
+        THEN NULLIF(bar->>'vol','')::numeric 
+        ELSE NULL 
+      END AS vol,
+      
+      CASE 
+        WHEN NULLIF(bar->>'vwap','') ~ '^-?[0-9]+\.?[0-9]*([eE][+-]?[0-9]+)?$' 
+        THEN NULLIF(bar->>'vwap','')::numeric 
+        ELSE NULL 
+      END AS vwap,
+      
+      CASE 
+        WHEN NULLIF(bar->>'trade_count','') ~ '^[0-9]+$' 
+        THEN NULLIF(bar->>'trade_count','')::integer 
+        ELSE NULL 
+      END AS trade_count,
 
-      COALESCE(NULLIF(bar->>'is_partial','')::boolean, false) AS is_partial,
-      COALESCE(NULLIF(bar->>'source',''), 'massive')         AS source,
-      COALESCE(NULLIF(bar->>'ingested_at','')::timestamptz, now()) AS ingested_at,
+      -- FIX #4: Safe boolean cast
+      CASE 
+        WHEN lower(NULLIF(bar->>'is_partial','')) IN ('true', 't', 'yes', 'y', '1') THEN true
+        WHEN lower(NULLIF(bar->>'is_partial','')) IN ('false', 'f', 'no', 'n', '0', '') THEN false
+        ELSE false
+      END AS is_partial,
+      
+      COALESCE(NULLIF(bar->>'source',''), 'massive') AS source,
+      
+      -- FIX #3: Safe timestamp cast for ingested_at
+      CASE 
+        WHEN bar->>'ingested_at' IS NULL THEN now()
+        WHEN bar->>'ingested_at' ~ '^\d{4}-\d{2}-\d{2}' THEN (bar->>'ingested_at')::timestamptz
+        ELSE now()
+      END AS ingested_at,
+      
       COALESCE(bar->'raw', '{}'::jsonb) AS raw_json
     FROM raw
   ),
   validated AS (
     SELECT
       p.*,
-      -- DXY detection (adjust if your canonical symbol differs)
       (upper(p.canonical_symbol) = 'DXY' OR upper(p.canonical_symbol) LIKE '%DXY%') AS is_dxy,
 
-      -- Compute validation error reason (NULL means valid)
       CASE
         WHEN p.canonical_symbol IS NULL THEN 'missing_canonical_symbol'
         WHEN p.timeframe IS NULL THEN 'missing_timeframe'
@@ -171,6 +228,10 @@ BEGIN
         WHEN p.high < p.open OR p.high < p.close THEN 'ohlc_invalid_high_lt_open_or_close'
         WHEN p.low  > p.open OR p.low  > p.close THEN 'ohlc_invalid_low_gt_open_or_close'
         WHEN p.vol IS NOT NULL AND p.vol < 0 THEN 'vol_negative'
+        -- FIX #1: Protect DXY basket currencies from zero/negative close prices
+        WHEN upper(p.canonical_symbol) IN ('EURUSD', 'USDJPY', 'GBPUSD', 'USDCAD', 'USDSEK', 'USDCHF')
+             AND p.close <= 0 THEN 'dxy_basket_invalid_close'
+        -- Protect DXY symbol itself
         WHEN (upper(p.canonical_symbol) = 'DXY' OR upper(p.canonical_symbol) LIKE '%DXY%')
              AND (p.open <= 0 OR p.high <= 0 OR p.low <= 0 OR p.close <= 0) THEN 'dxy_ohlc_must_be_gt_zero'
         ELSE NULL
@@ -184,8 +245,7 @@ BEGIN
   ),
   reject_stats AS (
     SELECT
-      COUNT(*) AS rejected_count,
-      -- keep up to 10 samples for debugging (idx + reason + ts)
+      COALESCE(COUNT(*), 0) AS rejected_count,
       COALESCE(
         jsonb_agg(
           jsonb_build_object(
@@ -247,6 +307,8 @@ BEGIN
     FROM valid
     ON CONFLICT (canonical_symbol, timeframe, ts_utc)
     DO UPDATE SET
+      -- FIX #5: Update OHLCV data but preserve original source/provider for audit trail
+      -- This prevents source churn and maintains first-writer attribution
       open = EXCLUDED.open,
       high = EXCLUDED.high,
       low = EXCLUDED.low,
@@ -255,25 +317,38 @@ BEGIN
       vwap = EXCLUDED.vwap,
       trade_count = EXCLUDED.trade_count,
       is_partial = EXCLUDED.is_partial,
+      -- provider_ticker and source intentionally NOT updated (locked to first write)
       ingested_at = EXCLUDED.ingested_at,
       raw = EXCLUDED.raw
     RETURNING
       ts_utc,
+      -- FIX #6: Document xmax = 0 limitation
+      -- Note: xmax = 0 is a heuristic (~99% accurate) to detect inserts vs updates.
+      -- In rare cases (concurrent updates, HOT updates), this may misclassify.
+      -- This is acceptable for telemetry purposes - exact counts aren't critical.
       (xmax = 0) AS was_inserted
+  ),
+  final_stats AS (
+    SELECT
+      COALESCE(COUNT(*) FILTER (WHERE was_inserted), 0) AS ins_count,
+      COALESCE(COUNT(*) FILTER (WHERE NOT was_inserted), 0) AS upd_count,
+      COALESCE(COUNT(*), 0) AS total_count,
+      MIN(ts_utc) AS min_ts,
+      MAX(ts_utc) AS max_ts
+    FROM upsert_result
   )
   SELECT
-    -- upsert counts
-    COUNT(*) FILTER (WHERE was_inserted),
-    COUNT(*) FILTER (WHERE NOT was_inserted),
-    COUNT(*),
-    MIN(ts_utc),
-    MAX(ts_utc)
-  INTO v_inserted, v_updated, v_upserted_total, v_start_ts, v_end_ts
-  FROM upsert_result;
-
-  SELECT rejected_count, samples_all
-  INTO v_rejected, v_reject_samples
-  FROM reject_stats;
+    COALESCE(fs.ins_count, 0),
+    COALESCE(fs.upd_count, 0),
+    COALESCE(fs.total_count, 0),
+    fs.min_ts,
+    fs.max_ts,
+    COALESCE(rs.rejected_count, 0),
+    COALESCE(rs.samples_all, '[]'::jsonb)
+  INTO v_inserted, v_updated, v_upserted_total, v_start_ts, v_end_ts, v_rejected, v_reject_samples
+  FROM (SELECT 1) dummy
+  LEFT JOIN final_stats fs ON true
+  LEFT JOIN reject_stats rs ON true;
 
   RETURN jsonb_build_object(
     'success', true,
@@ -305,7 +380,8 @@ GRANT EXECUTE ON FUNCTION upsert_bars_batch(jsonb) TO service_role;
 
 COMMENT ON FUNCTION upsert_bars_batch(jsonb) IS
 'Batch upsert bars from JSONB array. Validates OHLC integrity and rejects bad rows (does not crash whole batch).
-DXY safety: rejects rows where OHLC is NULL or <= 0.
+DXY safety: rejects rows where OHLC is NULL or <= 0 for DXY symbol itself, and close <= 0 for DXY basket currencies.
+Safe casting: uses regex validation to prevent casting errors on malformed input.
 Security: SECURITY DEFINER + fixed search_path + EXECUTE only for service_role.';
 
 -- ============================================================================
