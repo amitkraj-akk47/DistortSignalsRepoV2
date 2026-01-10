@@ -45,25 +45,25 @@ export default {
   },
 };
 
-async ole.log(`[AGG] Starting: env=${envName} job=${jobName} maxTasks=${maxTasks}`);
+async function runAggregation(env: Env): Promise<void> {
+  const envName = (env.ENV_NAME ?? "DEV").toUpperCase();
+  const jobName = env.JOB_NAME ?? "agg-master";
+  const trigger = env.TRIGGER ?? "cron";
 
-  const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { persistSession: false },
-  });
-
-  const runId = crypto.randomUUID();
-  console.log(`[AGG] Run ID: ${runId}`
   const maxTasks = Number(env.MAX_TASKS_PER_RUN ?? "20");
   const maxWindows = Number(env.MAX_WINDOWS_PER_TASK ?? "100");
   const runningStaleSeconds = Number(env.RUNNING_STALE_SECONDS ?? "900");
   const autoDisableHardFails = Number(env.AUTO_DISABLE_HARD_FAILS ?? "3");
   const derivationVersion = Number(env.AGG_DERIVATION_VERSION ?? "1");
 
+  console.log(`[AGG] Starting: env=${envName} job=${jobName} maxTasks=${maxTasks}`);
+
   const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
     auth: { persistSession: false },
   });
 
   const runId = crypto.randomUUID();
+  console.log(`[AGG] Run ID: ${runId}`);
 
   await supabase.rpc("ops_runlog_start", {
     p_run_id: runId,
@@ -83,7 +83,10 @@ async ole.log(`[AGG] Starting: env=${envName} job=${jobName} maxTasks=${maxTasks
     p_now_utc: new Date().toISOString(),
     p_limit: maxTasks,
     p_running_stale_seconds: runningStaleSeconds,
-  })console.error(`[AGG] Failed to get tasks:`, tasksErr);
+  });
+
+  if (tasksErr) {
+    console.error(`[AGG] Failed to get tasks:`, tasksErr);
     await supabase.rpc("ops_runlog_finish", {
       p_run_id: runId,
       p_status: "failed",
@@ -92,10 +95,7 @@ async ole.log(`[AGG] Starting: env=${envName} job=${jobName} maxTasks=${maxTasks
     return;
   }
 
-  console.log(`[AGG] Found ${tasks?.length ?? 0} due tasks`);   p_stats: { error: String(tasksErr.message ?? tasksErr) },
-    });
-    return;
-  }
+  console.log(`[AGG] Found ${tasks?.length ?? 0} due tasks`);
 
   await supabase.rpc("ops_runlog_checkpoint", {
     p_run_id: runId,
@@ -180,11 +180,11 @@ async ole.log(`[AGG] Starting: env=${envName} job=${jobName} maxTasks=${maxTasks
 
   await supabase.rpc("ops_runlog_prune", { p_job_name: jobName, p_trigger: trigger, p_keep: 10 });
 
-  console.log(`[AGG] Completed: ${totalCreated} bars created, ${totalPoor} poor quality, ${tasks?.length ?? 0} tasks processed`);
-
   await supabase.rpc("ops_runlog_finish", {
     p_run_id: runId,
     p_status: "success",
     p_stats: { bars_created: totalCreated, bars_quality_poor: totalPoor, tasks: tasks?.length ?? 0 },
   });
+
+  console.log(`[AGG] Completed: ${totalCreated} bars created, ${totalPoor} poor quality, ${tasks?.length ?? 0} tasks processed`);
 }
