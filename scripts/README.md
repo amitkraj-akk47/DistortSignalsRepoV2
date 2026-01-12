@@ -1,6 +1,20 @@
-# Deployment Scripts
+# Scripts
 
-Quick scripts for managing DistortSignals deployments.
+Scripts for managing DistortSignals deployments and data verification.
+
+## Data Verification
+
+### `verify_data.py`
+Comprehensive data verification tool for validating ingestion and aggregation pipeline.
+
+```bash
+cd scripts
+pip install -r requirements-verification.txt
+cp .env.example .env  # Edit with your Supabase credentials
+python verify_data.py --phase ALL
+```
+
+See [DATA_VERIFICATION.md](./DATA_VERIFICATION.md) for complete documentation.
 
 ## Setup Scripts
 

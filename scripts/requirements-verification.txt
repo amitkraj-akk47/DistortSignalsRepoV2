@@ -1,0 +1,6 @@
+# Data Verification Script Dependencies
+# Install with: pip install -r requirements-verification.txt
+
+psycopg2-binary>=2.9.9
+pandas>=2.0.0
+python-dotenv>=1.0.0

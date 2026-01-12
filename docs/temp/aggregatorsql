@@ -208,7 +208,7 @@ begin
       running_started_at_utc=null,
       last_error=left(coalesce(last_error,'') || ' | stale_running_recovered', 2000),
       updated_at=now()
-  where status='running'
+  where data_agg_state.status='running'
     and running_started_at_utc is not null
     and running_started_at_utc < (p_now_utc - make_interval(secs => p_running_stale_seconds));
 
