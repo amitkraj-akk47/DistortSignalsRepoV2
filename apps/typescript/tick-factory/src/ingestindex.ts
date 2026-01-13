@@ -1252,7 +1252,28 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
         // Continue with normal processing
       }
 
-      // ====== STEP 1: ingest_asset_start RPC (replaces POST + GET + PATCH) ======
+      // ====== STEP 1: Check pause_fetch flag ======
+      // If pause_fetch is true, skip API data fetching for this asset
+      try {
+        const pauseCheck = await supa.get<Array<{ pause_fetch: boolean }>>(
+          `/rest/v1/data_ingest_state?canonical_symbol=eq.${encodeURIComponent(canonical)}&timeframe=eq.${encodeURIComponent(tf)}&select=pause_fetch`
+        );
+        trackSubrequest();
+        
+        if (pauseCheck.length > 0 && pauseCheck[0].pause_fetch === true) {
+          log.info("PAUSED", `Asset ${canonical} (${tf}) has pause_fetch=true, skipping API fetch`);
+          bumpSkip("paused_by_flag");
+          await sleep(100 + jitter(100));
+          continue;
+        }
+      } catch (e) {
+        // If pause check fails, log and continue (don't break the run)
+        const errMsg = e instanceof Error ? e.message : String(e);
+        log.debug("PAUSE_CHECK_FAILED", `Pause check failed: ${errMsg}`);
+        // Continue with normal processing
+      }
+
+      // ====== STEP 2: ingest_asset_start RPC (replaces POST + GET + PATCH) ======
       log.debug("RPC_START", "Calling ingest_asset_start");
       let state: IngestStartState;
       try {
@@ -1273,7 +1294,7 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
         continue;
       }
 
-      // ====== STEP 2: Calculate time window ======
+      // ====== STEP 3: Calculate time window ======
       const tfSec = tfToSeconds(tf);
       const safetyLagSec = tf === "1m" ? 120 : 480;
       const overlapBars = tf === "1m" ? 5 : 2;
@@ -1323,7 +1344,7 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
         continue;
       }
 
-      // ====== STEP 3: Fetch from provider ======
+      // ====== STEP 4: Fetch from provider ======
       const mult = tf === "1m" ? 1 : 5;
       const fromDate = alignIsoToDateYYYYMMDD(toIso(fromTs));
       const toDate = alignIsoToDateYYYYMMDD(toIso(safeTo));
@@ -1359,7 +1380,7 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
 
       if (resp.status === 429) counts.http_429++;
 
-      // ====== STEP 4: Handle provider errors ======
+      // ====== STEP 5: Handle provider errors ======
       const respJson = resp.json as Record<string, unknown> | undefined;
       const providerBodyError = resp.ok && (respJson?.status === "ERROR" || respJson?.error || respJson?.message);
 
@@ -1445,7 +1466,7 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
         continue;
       }
 
-      // ====== STEP 5: Parse and filter bars ======
+      // ====== STEP 6: Parse and filter bars ======
       const resultsAny = respJson?.results;
       const results: Array<Record<string, unknown>> = Array.isArray(resultsAny) ? resultsAny : [];
 
@@ -1492,7 +1513,7 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
         };
       });
 
-      // ====== STEP 6: upsert_bars_batch RPC (replaces chunked POSTs) ======
+      // ====== STEP 7: upsert_bars_batch RPC (replaces chunked POSTs) ======
       let upsertResult: UpsertBarsResult | null = null;
       
       if (barRows.length > 0) {
@@ -1552,7 +1573,7 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
         log.info("NO_NEW_BARS", "No bars to upsert (all filtered out or empty response)");
       }
 
-      // ====== STEP 7: ingest_asset_finish RPC (success) ======
+      // ====== STEP 8: ingest_asset_finish RPC (success) ======
       const newCursor = barRows.length > 0 ? barRows[barRows.length - 1].ts_utc : state.last_bar_ts_utc;
       
       try {
