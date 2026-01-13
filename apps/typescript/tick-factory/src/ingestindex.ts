@@ -1047,16 +1047,36 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
 
     // Load active assets
     log.info("LOAD_ASSETS", `Loading assets with filter: ${gatingFilter}`);
-    const assets = await supa.get<AssetRow[]>(
+    // Load a larger pool, then rotate in-memory to spread work across runs
+    const assetsPerPage = maxAssets;
+    const fetchLimit = Math.max(assetsPerPage * 50, assetsPerPage); // enough to cover typical asset counts
+    let assets = await supa.get<AssetRow[]>(
       `/rest/v1/core_asset_registry_all` +
         `?select=canonical_symbol,provider_ticker,asset_class,source,endpoint_key,query_params,active,test_active,ingest_class,base_timeframe,is_sparse,is_contract,expected_update_seconds` +
         `&${gatingFilter}` +
         `&is_contract=eq.false&ingest_class=in.(A,B)` +
-        `&order=canonical_symbol.asc&limit=${maxAssets}`
+        `&order=canonical_symbol.asc&limit=${fetchLimit}`
     );
     trackSubrequest();
+    const totalAssets = assets.length;
+
+    // Rotate selection window to avoid always picking the same first N assets
+    if (totalAssets > assetsPerPage) {
+      const pageCount = Math.max(1, Math.ceil(totalAssets / assetsPerPage));
+      const pageIndex = Math.floor(Date.now() / 60000) % pageCount; // minute-based rotation
+      const start = pageIndex * assetsPerPage;
+      assets = assets.slice(start).concat(assets.slice(0, start));
+      log.info("ASSETS_ROTATED", `Rotated asset window page ${pageIndex + 1}/${pageCount}`, {
+        start,
+        pageSize: assetsPerPage,
+        totalAssets,
+      });
+    }
+
+    // Trim to the per-run cap after rotation
+    assets = assets.slice(0, assetsPerPage);
     counts.assets_total = assets.length;
-    log.info("ASSETS_LOADED", `Loaded ${assets.length} assets for ingestion`);
+    log.info("ASSETS_LOADED", `Loaded ${assets.length} assets for ingestion`, { totalAssets });
 
     // Load active endpoints
     log.info("LOAD_ENDPOINTS", "Loading Massive endpoints");
