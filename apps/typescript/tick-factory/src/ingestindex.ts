@@ -1054,6 +1054,24 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
       endpointKeys: Array.from(endpointsByKey.keys()),
     });
 
+    // Load pause_fetch flags for all assets at once (instead of per-asset checks)
+    log.debug("LOAD_PAUSE_FLAGS", "Loading pause_fetch flags for assets");
+    const pauseFetchStates = await supa.get<Array<{ canonical_symbol: string; timeframe: string; pause_fetch: boolean }>>(
+      `/rest/v1/data_ingest_state?select=canonical_symbol,timeframe,pause_fetch`
+    );
+    trackSubrequest();
+    const pauseFetchMap = new Map<string, Set<string>>();
+    for (const state of pauseFetchStates) {
+      const key = state.canonical_symbol;
+      if (state.pause_fetch) {
+        if (!pauseFetchMap.has(key)) {
+          pauseFetchMap.set(key, new Set());
+        }
+        pauseFetchMap.get(key)!.add(state.timeframe);
+      }
+    }
+    log.debug("PAUSE_FLAGS_LOADED", `Loaded pause flags for ${pauseFetchMap.size} symbols`);
+
     log.phaseEnd("LOAD_DATA", { assets: assets.length, endpoints: endpoints.length, subrequests: counts.subrequests });
 
     // ========================================================================
@@ -1084,29 +1102,31 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
           orphanedRecords: orphanedToMark.map(o => `${o.symbol}/${o.tf}`)
         });
         
-        // Mark each orphaned record
-        for (const orphan of orphanedToMark) {
-          try {
-            await supa.patch(
-              `/rest/v1/data_ingest_state?canonical_symbol=eq.${encodeURIComponent(orphan.symbol)}&timeframe=eq.${encodeURIComponent(orphan.tf)}`,
-              {
-                status: "orphaned",
-                notes: `ORPHAN RECORD: Asset disabled or removed on ${toIso(nowUtc())}. State record detected by worker and marked for cleanup. This record should be deleted.`,
-                updated_at: toIso(nowUtc())
-              },
-              "return=minimal"
-            );
-            trackSubrequest();
-            log.info("ORPHAN_MARKED", `Marked ${orphan.symbol}/${orphan.tf} as orphaned`);
-          } catch (e) {
-            const errMsg = e instanceof Error ? e.message : String(e);
-            log.debug("ORPHAN_MARK_FAILED", `Failed to mark ${orphan.symbol}/${orphan.tf}: ${errMsg}`);
-          }
-        }
+        // Mark each orphaned record (batch them to reduce subrequests)
+        const orphanUpdates = orphanedToMark.map(orphan => ({
+          canonical_symbol: orphan.symbol,
+          timeframe: orphan.tf,
+          status: "orphaned",
+          notes: `ORPHAN: disabled on ${toIso(nowUtc())}`,
+          updated_at: toIso(nowUtc())
+        }));
         
-        log.info("ORPHAN_SCAN_COMPLETE", `Marked ${orphanedToMark.length} orphaned records`, {
-          markedCount: orphanedToMark.length
-        });
+        // Batch update instead of individual PATCH calls
+        try {
+          await supa.patch(
+            `/rest/v1/data_ingest_state`,
+            orphanUpdates,
+            "return=minimal"
+          );
+          trackSubrequest();
+          log.info("ORPHAN_MARKED", `Marked ${orphanedToMark.length} orphaned records`, {
+            count: orphanedToMark.length
+          });
+        } catch (e) {
+          const errMsg = e instanceof Error ? e.message : String(e);
+          log.warn("ORPHAN_MARK_WARN", `Failed to mark orphaned records: ${errMsg}`);
+          // Don't break the run if marking fails
+        }
       } else {
         log.info("ORPHAN_SCAN_COMPLETE", "No orphaned records found");
       }
@@ -1254,23 +1274,11 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
 
       // ====== STEP 1: Check pause_fetch flag ======
       // If pause_fetch is true, skip API data fetching for this asset
-      try {
-        const pauseCheck = await supa.get<Array<{ pause_fetch: boolean }>>(
-          `/rest/v1/data_ingest_state?canonical_symbol=eq.${encodeURIComponent(canonical)}&timeframe=eq.${encodeURIComponent(tf)}&select=pause_fetch`
-        );
-        trackSubrequest();
-        
-        if (pauseCheck.length > 0 && pauseCheck[0].pause_fetch === true) {
-          log.info("PAUSED", `Asset ${canonical} (${tf}) has pause_fetch=true, skipping API fetch`);
-          bumpSkip("paused_by_flag");
-          await sleep(100 + jitter(100));
-          continue;
-        }
-      } catch (e) {
-        // If pause check fails, log and continue (don't break the run)
-        const errMsg = e instanceof Error ? e.message : String(e);
-        log.debug("PAUSE_CHECK_FAILED", `Pause check failed: ${errMsg}`);
-        // Continue with normal processing
+      if (pauseFetchMap.has(canonical) && pauseFetchMap.get(canonical)!.has(tf)) {
+        log.info("PAUSED", `Asset ${canonical} (${tf}) has pause_fetch=true, skipping API fetch`);
+        bumpSkip("paused_by_flag");
+        await sleep(100 + jitter(100));
+        continue;
       }
 
       // ====== STEP 2: ingest_asset_start RPC (replaces POST + GET + PATCH) ======
