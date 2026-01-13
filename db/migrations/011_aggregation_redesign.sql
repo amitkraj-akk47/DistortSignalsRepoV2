@@ -494,9 +494,11 @@ BEGIN
       updated_at = now()
     RETURNING xmax = 0 AS was_inserted
   )
-  SELECT COUNT(*) INTO v_created FROM upsert_result WHERE was_inserted;
-
-  SELECT COUNT(*) INTO v_updated FROM upsert_result WHERE NOT was_inserted;
+  SELECT
+    COUNT(*) FILTER (WHERE was_inserted) AS created,
+    COUNT(*) FILTER (WHERE NOT was_inserted) AS updated
+  INTO v_created, v_updated
+  FROM upsert_result;
 
   -- Disable tasks for inactive assets
   UPDATE data_agg_state das
