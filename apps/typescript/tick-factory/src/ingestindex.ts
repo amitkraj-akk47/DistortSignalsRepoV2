@@ -1089,66 +1089,10 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
     log.phaseEnd("LOAD_DATA", { assets: assets.length, endpoints: endpoints.length, subrequests: counts.subrequests });
 
     // ========================================================================
-    // ORPHAN RECORD DETECTION & MARKING
+    // ORPHAN RECORD DETECTION & MARKING (disabled to reduce subrequests)
     // ========================================================================
     log.setPhase("ORPHAN_CLEANUP");
-    log.info("ORPHAN_SCAN_START", "Scanning for orphaned state records");
-    
-    try {
-      // Find state records where asset is disabled or doesn't exist
-      const orphanedStates = await supa.get<Array<{ canonical_symbol: string; timeframe: string; status: string }>>(
-        `/rest/v1/data_ingest_state?select=canonical_symbol,timeframe,status&status=neq.orphaned`
-      );
-      trackSubrequest();
-      
-      const loadedSymbols = new Set(assets.map(a => a.canonical_symbol));
-      const orphanedToMark: Array<{ symbol: string; tf: string }> = [];
-      
-      for (const state of orphanedStates) {
-        // If state exists but asset is not in loaded active assets = orphaned
-        if (!loadedSymbols.has(state.canonical_symbol)) {
-          orphanedToMark.push({ symbol: state.canonical_symbol, tf: state.timeframe });
-        }
-      }
-      
-      if (orphanedToMark.length > 0) {
-        log.info("ORPHAN_DETECTED", `Found ${orphanedToMark.length} orphaned state records`, {
-          orphanedRecords: orphanedToMark.map(o => `${o.symbol}/${o.tf}`)
-        });
-        
-        // Mark each orphaned record (batch them to reduce subrequests)
-        const orphanUpdates = orphanedToMark.map(orphan => ({
-          canonical_symbol: orphan.symbol,
-          timeframe: orphan.tf,
-          status: "orphaned",
-          notes: `ORPHAN: disabled on ${toIso(nowUtc())}`,
-          updated_at: toIso(nowUtc())
-        }));
-        
-        // Batch update instead of individual PATCH calls
-        try {
-          await supa.patch(
-            `/rest/v1/data_ingest_state`,
-            orphanUpdates,
-            "return=minimal"
-          );
-          trackSubrequest();
-          log.info("ORPHAN_MARKED", `Marked ${orphanedToMark.length} orphaned records`, {
-            count: orphanedToMark.length
-          });
-        } catch (e) {
-          const errMsg = e instanceof Error ? e.message : String(e);
-          log.warn("ORPHAN_MARK_WARN", `Failed to mark orphaned records: ${errMsg}`);
-          // Don't break the run if marking fails
-        }
-      } else {
-        log.info("ORPHAN_SCAN_COMPLETE", "No orphaned records found");
-      }
-    } catch (e) {
-      const errMsg = e instanceof Error ? e.message : String(e);
-      log.debug("ORPHAN_SCAN_FAILED", `Orphan scan failed: ${errMsg}`);
-      // Non-critical, continue with normal processing
-    }
+    log.info("ORPHAN_SKIP", "Orphan cleanup disabled to reduce rate limiting - run manually if needed");
     
     log.phaseEnd("ORPHAN_CLEANUP", { subrequests: counts.subrequests });
 
