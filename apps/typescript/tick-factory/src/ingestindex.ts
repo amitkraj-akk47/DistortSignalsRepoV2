@@ -17,6 +17,18 @@
 // TYPES & INTERFACES
 // ============================================================================
 
+// Cloudflare Workers types
+interface ScheduledEvent {
+  cron: string;
+  scheduledTime: number;
+  noRetry(): void;
+}
+
+interface ExecutionContext {
+  waitUntil(promise: Promise<any>): void;
+  passThroughOnException(): void;
+}
+
 export interface Env {
   // Required
   SUPABASE_URL: string;
@@ -876,6 +888,9 @@ async function enforceFetchCooldownBestEffort(
 // ============================================================================
 
 async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> {
+  const functionStartTime = Date.now();
+  let cpuCheckpoint = Date.now();
+  
   // Initialize logger
   const logLevelStr = strEnv(env.LOG_LEVEL, "INFO").toUpperCase();
   const logLevel: LogLevel = ["DEBUG", "INFO", "WARN", "ERROR"].includes(logLevelStr) 
@@ -884,7 +899,7 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
   const progressInterval = numEnv(env.PROGRESS_INTERVAL, 10);
   log = new Logger(logLevel, progressInterval);
   
-  log.phaseStart("INIT", { trigger, timestamp: toIso(nowUtc()) });
+  log.phaseStart("INIT", { trigger, timestamp: toIso(nowUtc()), functionStartTime });
   
   const supa = SupabaseRest.fromEnv(env);
   log.debug("DB_CONNECT", "Supabase client initialized");
@@ -1020,6 +1035,7 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
   const fxWindowsIngested: Map<string, Set<string>> = new Map(); // window_key -> Set<symbol>
   let dxyDerivedCount = 0;
   let dxyFailedCount = 0;
+  let lastAssetProcessed: string | null = null;
 
   const makeWindowKey = (from: Date, to: Date): string => {
     return `${toIso(from)}|${toIso(to)}`;
@@ -1086,7 +1102,9 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
       });
     }
 
-    log.phaseEnd("LOAD_DATA", { assets: assets.length, endpoints: endpoints.length, subrequests: counts.subrequests });
+    const loadDataElapsed = Date.now() - cpuCheckpoint;
+    log.phaseEnd("LOAD_DATA", { assets: assets.length, endpoints: endpoints.length, subrequests: counts.subrequests, elapsedMs: loadDataElapsed });
+    cpuCheckpoint = Date.now();
 
     // ========================================================================
     // ORPHAN RECORD DETECTION & MARKING (disabled to reduce subrequests)
@@ -1094,7 +1112,9 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
     log.setPhase("ORPHAN_CLEANUP");
     log.info("ORPHAN_SKIP", "Orphan cleanup disabled to reduce rate limiting - run manually if needed");
     
-    log.phaseEnd("ORPHAN_CLEANUP", { subrequests: counts.subrequests });
+    const orphanCleanupElapsed = Date.now() - cpuCheckpoint;
+    log.phaseEnd("ORPHAN_CLEANUP", { subrequests: counts.subrequests, elapsedMs: orphanCleanupElapsed });
+    cpuCheckpoint = Date.now();
 
     // ========================================================================
     // ASSET PROCESSING LOOP (REFACTORED WITH RPCs)
@@ -1103,8 +1123,12 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
     log.info("LOOP_START", `Starting asset processing loop`, { total: assets.length });
     
     let assetIndex = 0;
+    
     for (const asset of assets) {
       assetIndex++;
+      const assetStartTime = Date.now();
+      const loopElapsed = assetStartTime - functionStartTime;
+      lastAssetProcessed = asset.canonical_symbol;
       
       // Check run budget
       if (maxRunBudgetMs && Date.now() - runStartMs > maxRunBudgetMs) {
@@ -1112,6 +1136,7 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
           processed: assetIndex - 1,
           remaining: assets.length - assetIndex + 1,
           subrequests: counts.subrequests,
+          loopElapsed,
         });
         break;
       }
@@ -1121,7 +1146,10 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
         ingestClass: asset.ingest_class,
         timeframe: asset.base_timeframe,
         endpointKey: asset.endpoint_key,
+        loopElapsedMs: loopElapsed,
       });
+      
+      try {
 
       // ====== PRE-VALIDATION (no subrequests) ======
       
@@ -1610,7 +1638,70 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
       }
       
       await sleep(100 + jitter(150));
+      
+      const assetDuration = Date.now() - assetStartTime;
+      log.debug("ASSET_TIMING", `Asset processing completed`, {
+        symbol: canonical,
+        durationMs: assetDuration,
+        totalElapsedMs: Date.now() - functionStartTime,
+      });
+      
+      } catch (assetError) {
+        // Catch any unhandled errors during asset processing
+        const assetDuration = Date.now() - assetStartTime;
+        const errMsg = assetError instanceof Error ? assetError.message : String(assetError);
+        const errStack = assetError instanceof Error ? assetError.stack : undefined;
+        
+        log.error("ASSET_UNHANDLED_ERROR", `Unhandled error processing asset ${canonical}`, {
+          symbol: canonical,
+          error: errMsg,
+          durationMs: assetDuration,
+          totalElapsedMs: Date.now() - functionStartTime,
+          assetIndex,
+          totalAssets: assets.length,
+        });
+        
+        if (errStack) {
+          console.error(`[ASSET_ERROR_STACK] ${canonical}:`, errStack);
+        }
+        
+        counts.assets_failed++;
+        
+        // Try to record the failure
+        try {
+          await opsUpsertIssueBestEffort(supa, issuesOn, {
+            severity_level: 1,
+            issue_type: "ASSET_PROCESSING_ERROR",
+            source_system: "ingestion",
+            canonical_symbol: canonical,
+            component: "ingestion",
+            summary: `Unhandled error processing asset ${canonical}`,
+            description: errMsg,
+            metadata: { 
+              asset_index: assetIndex,
+              error: errMsg,
+              stack: errStack,
+              duration_ms: assetDuration,
+            },
+            related_job_run_id: runId,
+          });
+          trackSubrequest();
+        } catch {
+          // Best effort - don't throw
+        }
+        
+        await sleep(100 + jitter(200));
+        continue;
+      }
     }
+    
+    const loopTotalElapsed = Date.now() - cpuCheckpoint;
+    log.info("LOOP_COMPLETE", `Asset processing loop completed`, {
+      processed: assetIndex,
+      total: assets.length,
+      loopElapsedMs: loopTotalElapsed,
+      lastAssetProcessed,
+    });
 
     // ========================================================================
     // JOB COMPLETION
@@ -1656,6 +1747,13 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
     if (Object.keys(counts.skip_reasons).length > 0) {
       log.info("SKIP_REASONS", "Skip breakdown", counts.skip_reasons);
     }
+    
+    const totalFunctionTime = Date.now() - functionStartTime;
+    log.info("TIMING_SUMMARY", "Total function execution time", {
+      totalMs: totalFunctionTime,
+      totalSec: (totalFunctionTime / 1000).toFixed(2),
+    });
+    
     log.phaseEnd("SUMMARY");
 
     await opsRunFinishBestEffort(supa, runId, {
@@ -1666,17 +1764,32 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
     });
     trackSubrequest();
     
-    log.info("JOB_COMPLETE", `✓ Ingestion job completed successfully`, { subrequests: counts.subrequests });
+    log.info("JOB_COMPLETE", `✓ Ingestion job completed successfully`, { 
+      subrequests: counts.subrequests,
+      totalExecutionMs: Date.now() - functionStartTime,
+    });
   } catch (e: unknown) {
     counts.duration_ms = Date.now() - runStartMs;
+    const totalFunctionTime = Date.now() - functionStartTime;
     const err = e as Error;
 
     log.setPhase("ERROR");
     log.error("JOB_FAILED", `✗ Ingestion job FAILED: ${err.message}`, {
       error: err.message,
+      stack: err.stack,
       duration_ms: counts.duration_ms,
+      totalFunctionTimeMs: totalFunctionTime,
       subrequests: counts.subrequests,
       counts,
+      lastAssetProcessed: lastAssetProcessed || "none",
+    });
+    
+    console.error("[JOB_FAILED_DETAIL]", {
+      errorType: err?.constructor?.name || typeof e,
+      message: err.message,
+      stack: err.stack,
+      totalExecutionMs: totalFunctionTime,
+      lastAssetProcessed: lastAssetProcessed || "none",
     });
 
     await opsRunFinishBestEffort(supa, runId, {
@@ -1700,9 +1813,16 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
 
     throw e;
   } finally {
+    const finalExecutionTime = Date.now() - functionStartTime;
     log.info("LOCK_RELEASE", `Releasing lock: ${jobName}`);
     await opsReleaseLockBestEffort(supa, jobName);
-    log.info("CLEANUP", "Job cleanup complete");
+    log.info("CLEANUP", `Job cleanup complete - Total execution time: ${finalExecutionTime}ms (${(finalExecutionTime/1000).toFixed(2)}s)`);
+    
+    console.log("[FUNCTION_TIMING]", {
+      totalExecutionMs: finalExecutionTime,
+      totalExecutionSec: (finalExecutionTime / 1000).toFixed(2),
+      timestamp: new Date().toISOString(),
+    });
   }
 }
 
@@ -1712,7 +1832,39 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
 
 export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(runIngestAB(env, "cron"));
+    const startTime = Date.now();
+    console.log(`[CRON] Starting scheduled execution at ${new Date().toISOString()}`);
+    console.log(`[CRON] Event:`, JSON.stringify({
+      cron: event.cron,
+      scheduledTime: event.scheduledTime,
+    }));
+    
+    try {
+      await runIngestAB(env, "cron");
+      const duration = Date.now() - startTime;
+      console.log(`[CRON] ✓ Completed successfully in ${duration}ms`);
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorStack = error instanceof Error ? error.stack : undefined;
+      
+      console.error(`[CRON] ✗ FAILED after ${duration}ms`);
+      console.error(`[CRON] Error type: ${error?.constructor?.name || typeof error}`);
+      console.error(`[CRON] Error message: ${errorMessage}`);
+      if (errorStack) {
+        console.error(`[CRON] Stack trace:`, errorStack);
+      }
+      console.error(`[CRON] Full error object:`, JSON.stringify(error, null, 2));
+      
+      // Log CPU exhaustion specifically
+      if (errorMessage.includes('CPU') || errorMessage.includes('exceeded') || errorMessage.includes('timeout')) {
+        console.error(`[CRON] ⚠️  POSSIBLE CPU LIMIT EXCEEDED - Worker killed mid-execution`);
+        console.error(`[CRON] Consider: Reduce MAX_ASSETS_PER_RUN, increase worker CPU limits, or optimize queries`);
+      }
+      
+      // Re-throw to ensure Cloudflare logs the error
+      throw new Error(`Cron execution failed: ${errorMessage}`);
+    }
   },
 
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
