@@ -1061,6 +1061,8 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
     );
     trackSubrequest();
     const pauseFetchMap = new Map<string, Set<string>>();
+    const pausedRecords: Array<{ symbol: string; tf: string }> = [];
+    
     for (const state of pauseFetchStates) {
       const key = state.canonical_symbol;
       if (state.pause_fetch) {
@@ -1068,9 +1070,21 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
           pauseFetchMap.set(key, new Set());
         }
         pauseFetchMap.get(key)!.add(state.timeframe);
+        pausedRecords.push({ symbol: key, tf: state.timeframe });
       }
     }
-    log.debug("PAUSE_FLAGS_LOADED", `Loaded pause flags for ${pauseFetchMap.size} symbols`);
+    
+    log.info("PAUSE_FLAGS_LOADED", `Loaded pause flags - ${pausedRecords.length} assets paused`, {
+      paused_count: pausedRecords.length,
+      paused_assets: pausedRecords.map(r => `${r.symbol}/${r.tf}`),
+      total_state_records: pauseFetchStates.length
+    });
+    
+    if (pausedRecords.length > 0) {
+      log.debug("PAUSED_ASSETS_DETAIL", "Assets with pause_fetch=true", {
+        paused: pausedRecords
+      });
+    }
 
     log.phaseEnd("LOAD_DATA", { assets: assets.length, endpoints: endpoints.length, subrequests: counts.subrequests });
 
@@ -1274,12 +1288,26 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
 
       // ====== STEP 1: Check pause_fetch flag ======
       // If pause_fetch is true, skip API data fetching for this asset
-      if (pauseFetchMap.has(canonical) && pauseFetchMap.get(canonical)!.has(tf)) {
-        log.info("PAUSED", `Asset ${canonical} (${tf}) has pause_fetch=true, skipping API fetch`);
+      const isPaused = pauseFetchMap.has(canonical) && pauseFetchMap.get(canonical)!.has(tf);
+      
+      if (isPaused) {
+        log.info("PAUSED", `Asset ${canonical} (${tf}) has pause_fetch=true - SKIPPING ALL PROCESSING`);
+        log.debug("PAUSE_DETAILS", `Pause flag check result`, {
+          symbol: canonical,
+          timeframe: tf,
+          pause_fetch: true,
+          action: "skip_asset"
+        });
         bumpSkip("paused_by_flag");
         await sleep(100 + jitter(100));
-        continue;
+        continue;  // Skip to next asset - NO API calls, NO database writes
       }
+      
+      log.debug("PAUSE_CHECK", `Pause check passed (not paused)`, {
+        symbol: canonical,
+        timeframe: tf,
+        pause_fetch: false
+      });
 
       // ====== STEP 2: ingest_asset_start RPC (replaces POST + GET + PATCH) ======
       log.debug("RPC_START", "Calling ingest_asset_start");
@@ -1371,6 +1399,15 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
       });
 
       const headers = { Authorization: `Bearer ${env.MASSIVE_KEY}` };
+      
+      log.info("API_FETCH_START", `🔄 MAKING API CALL to Massive - Asset is NOT paused`, {
+        symbol: canonical,
+        timeframe: tf,
+        from: fromDate,
+        to: toDate,
+        endpoint: asset.endpoint_key
+      });
+      
       const resp = await fetchJsonWithRetry({
         url,
         headers,
