@@ -1057,6 +1057,68 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
     log.phaseEnd("LOAD_DATA", { assets: assets.length, endpoints: endpoints.length, subrequests: counts.subrequests });
 
     // ========================================================================
+    // ORPHAN RECORD DETECTION & MARKING
+    // ========================================================================
+    log.setPhase("ORPHAN_CLEANUP");
+    log.info("ORPHAN_SCAN_START", "Scanning for orphaned state records");
+    
+    try {
+      // Find state records where asset is disabled or doesn't exist
+      const orphanedStates = await supa.get<Array<{ canonical_symbol: string; timeframe: string; status: string }>>(
+        `/rest/v1/data_ingest_state?select=canonical_symbol,timeframe,status&status=neq.orphaned`
+      );
+      trackSubrequest();
+      
+      const loadedSymbols = new Set(assets.map(a => a.canonical_symbol));
+      const orphanedToMark: Array<{ symbol: string; tf: string }> = [];
+      
+      for (const state of orphanedStates) {
+        // If state exists but asset is not in loaded active assets = orphaned
+        if (!loadedSymbols.has(state.canonical_symbol)) {
+          orphanedToMark.push({ symbol: state.canonical_symbol, tf: state.timeframe });
+        }
+      }
+      
+      if (orphanedToMark.length > 0) {
+        log.info("ORPHAN_DETECTED", `Found ${orphanedToMark.length} orphaned state records`, {
+          orphanedRecords: orphanedToMark.map(o => `${o.symbol}/${o.tf}`)
+        });
+        
+        // Mark each orphaned record
+        for (const orphan of orphanedToMark) {
+          try {
+            await supa.patch(
+              `/rest/v1/data_ingest_state?canonical_symbol=eq.${encodeURIComponent(orphan.symbol)}&timeframe=eq.${encodeURIComponent(orphan.tf)}`,
+              {
+                status: "orphaned",
+                notes: `ORPHAN RECORD: Asset disabled or removed on ${toIso(nowUtc())}. State record detected by worker and marked for cleanup. This record should be deleted.`,
+                updated_at: toIso(nowUtc())
+              },
+              "return=minimal"
+            );
+            trackSubrequest();
+            log.info("ORPHAN_MARKED", `Marked ${orphan.symbol}/${orphan.tf} as orphaned`);
+          } catch (e) {
+            const errMsg = e instanceof Error ? e.message : String(e);
+            log.debug("ORPHAN_MARK_FAILED", `Failed to mark ${orphan.symbol}/${orphan.tf}: ${errMsg}`);
+          }
+        }
+        
+        log.info("ORPHAN_SCAN_COMPLETE", `Marked ${orphanedToMark.length} orphaned records`, {
+          markedCount: orphanedToMark.length
+        });
+      } else {
+        log.info("ORPHAN_SCAN_COMPLETE", "No orphaned records found");
+      }
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      log.debug("ORPHAN_SCAN_FAILED", `Orphan scan failed: ${errMsg}`);
+      // Non-critical, continue with normal processing
+    }
+    
+    log.phaseEnd("ORPHAN_CLEANUP", { subrequests: counts.subrequests });
+
+    // ========================================================================
     // ASSET PROCESSING LOOP (REFACTORED WITH RPCs)
     // ========================================================================
     log.setPhase("PROCESS");
@@ -1140,6 +1202,55 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
       }
 
       counts.assets_attempted++;
+
+      // ====== STEP 0.5: SAFEGUARD - Check for orphaned state records ======
+      // Prevents loading state for assets that have been disabled but still have stale records
+      // If found, marks them as orphaned and skips processing
+      try {
+        const stateCheck = await supa.get<Array<{ canonical_symbol: string; timeframe: string }>>(
+          `/rest/v1/data_ingest_state?canonical_symbol=eq.${encodeURIComponent(canonical)}&timeframe=eq.${encodeURIComponent(tf)}&select=canonical_symbol,timeframe`
+        );
+        trackSubrequest();
+        
+        if (stateCheck.length > 0) {
+          // Verify this asset is actually in the active registry
+          const registryCheck = await supa.get<Array<{ canonical_symbol: string }>>(
+            `/rest/v1/core_asset_registry_all?canonical_symbol=eq.${encodeURIComponent(canonical)}&select=canonical_symbol`
+          );
+          trackSubrequest();
+          
+          // State exists but asset no longer in registry (orphaned)
+          if (registryCheck.length === 0) {
+            log.warn("ORPHANED_STATE", `Orphaned state record detected for ${canonical} (${tf}), marking and skipping`, {
+              reason: "asset_disabled_but_state_exists"
+            });
+            
+            // Mark the record as orphaned with a note
+            try {
+              await supa.patch(
+                `/rest/v1/data_ingest_state?canonical_symbol=eq.${encodeURIComponent(canonical)}&timeframe=eq.${encodeURIComponent(tf)}`,
+                {
+                  status: "orphaned",
+                  notes: `ORPHAN RECORD: Asset disabled on ${toIso(nowUtc())} but state record was not cleaned up. This record should be deleted.`
+                },
+                "return=minimal"
+              );
+              trackSubrequest();
+            } catch {
+              // Best effort marking
+            }
+            
+            bumpSkip("orphaned_state_record");
+            await sleep(100 + jitter(100));
+            continue;
+          }
+        }
+      } catch (e) {
+        // If safeguard check fails, log warning but continue (don't break the run)
+        const errMsg = e instanceof Error ? e.message : String(e);
+        log.debug("SAFEGUARD_CHECK_FAILED", `Orphaned state check failed: ${errMsg}`);
+        // Continue with normal processing
+      }
 
       // ====== STEP 1: ingest_asset_start RPC (replaces POST + GET + PATCH) ======
       log.debug("RPC_START", "Calling ingest_asset_start");
