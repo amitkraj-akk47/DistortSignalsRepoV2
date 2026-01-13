@@ -8,11 +8,11 @@ account_id = "513f37da8020ee565269c199ff8bb52f"
 
 [env.dev]
 name = "tick-factory-dev"
-triggers = { crons = ["*/2 * * * *"] }
+triggers = { crons = ["*/1 * * * *"] }
 
 [env.dev.vars]
 JOB_NAME = "tick_factory_ingest_massive_ab"
-MAX_ASSETS_PER_RUN = "200"
+MAX_ASSETS_PER_RUN = "4"
 REQUEST_TIMEOUT_MS = "30000"
 LOCK_LEASE_SECONDS = "150"
 ASSET_ACTIVE_FIELD = "test_active"
@@ -25,11 +25,11 @@ PROGRESS_INTERVAL = "10"
 
 [env.test]
 name = "tick-factory-test"
-triggers = { crons = ["*/2 * * * *"] }
+triggers = { crons = ["*/1 * * * *"] }
 
 [env.test.vars]
 JOB_NAME = "tick_factory_ingest_massive_ab"
-MAX_ASSETS_PER_RUN = "200"
+MAX_ASSETS_PER_RUN = "4"
 REQUEST_TIMEOUT_MS = "30000"
 LOCK_LEASE_SECONDS = "150"
 ASSET_ACTIVE_FIELD = "test_active"
@@ -42,11 +42,11 @@ PROGRESS_INTERVAL = "10"
 
 [env.stage]
 name = "tick-factory-stage"
-triggers = { crons = ["*/2 * * * *"] }
+triggers = { crons = ["*/1 * * * *"] }
 
 [env.stage.vars]
 JOB_NAME = "tick_factory_ingest_massive_ab"
-MAX_ASSETS_PER_RUN = "200"
+MAX_ASSETS_PER_RUN = "4"
 REQUEST_TIMEOUT_MS = "30000"
 LOCK_LEASE_SECONDS = "150"
 ASSET_ACTIVE_FIELD = "active"
@@ -59,11 +59,11 @@ PROGRESS_INTERVAL = "10"
 
 [env.prod]
 name = "tick-factory-prod"
-triggers = { crons = ["*/2 * * * *"] }
+triggers = { crons = ["*/1 * * * *"] }
 
 [env.prod.vars]
 JOB_NAME = "tick_factory_ingest_massive_ab"
-MAX_ASSETS_PER_RUN = "200"
+MAX_ASSETS_PER_RUN = "4"
 REQUEST_TIMEOUT_MS = "30000"
 LOCK_LEASE_SECONDS = "150"
 ASSET_ACTIVE_FIELD = "active"
