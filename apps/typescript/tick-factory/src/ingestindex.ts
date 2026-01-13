@@ -1181,55 +1181,6 @@ async function runIngestAB(env: Env, trigger: "cron" | "manual"): Promise<void> 
 
       counts.assets_attempted++;
 
-      // ====== STEP 0.5: SAFEGUARD - Check for orphaned state records ======
-      // Prevents loading state for assets that have been disabled but still have stale records
-      // If found, marks them as orphaned and skips processing
-      try {
-        const stateCheck = await supa.get<Array<{ canonical_symbol: string; timeframe: string }>>(
-          `/rest/v1/data_ingest_state?canonical_symbol=eq.${encodeURIComponent(canonical)}&timeframe=eq.${encodeURIComponent(tf)}&select=canonical_symbol,timeframe`
-        );
-        trackSubrequest();
-        
-        if (stateCheck.length > 0) {
-          // Verify this asset is actually in the active registry
-          const registryCheck = await supa.get<Array<{ canonical_symbol: string }>>(
-            `/rest/v1/core_asset_registry_all?canonical_symbol=eq.${encodeURIComponent(canonical)}&select=canonical_symbol`
-          );
-          trackSubrequest();
-          
-          // State exists but asset no longer in registry (orphaned)
-          if (registryCheck.length === 0) {
-            log.warn("ORPHANED_STATE", `Orphaned state record detected for ${canonical} (${tf}), marking and skipping`, {
-              reason: "asset_disabled_but_state_exists"
-            });
-            
-            // Mark the record as orphaned with a note
-            try {
-              await supa.patch(
-                `/rest/v1/data_ingest_state?canonical_symbol=eq.${encodeURIComponent(canonical)}&timeframe=eq.${encodeURIComponent(tf)}`,
-                {
-                  status: "orphaned",
-                  notes: `ORPHAN RECORD: Asset disabled on ${toIso(nowUtc())} but state record was not cleaned up. This record should be deleted.`
-                },
-                "return=minimal"
-              );
-              trackSubrequest();
-            } catch {
-              // Best effort marking
-            }
-            
-            bumpSkip("orphaned_state_record");
-            await sleep(100 + jitter(100));
-            continue;
-          }
-        }
-      } catch (e) {
-        // If safeguard check fails, log warning but continue (don't break the run)
-        const errMsg = e instanceof Error ? e.message : String(e);
-        log.debug("SAFEGUARD_CHECK_FAILED", `Orphaned state check failed: ${errMsg}`);
-        // Continue with normal processing
-      }
-
       // ====== STEP 1: Check pause_fetch flag ======
       // If pause_fetch is true, skip API data fetching for this asset
       const isPaused = pauseFetchMap.has(canonical) && pauseFetchMap.get(canonical)!.has(tf);
