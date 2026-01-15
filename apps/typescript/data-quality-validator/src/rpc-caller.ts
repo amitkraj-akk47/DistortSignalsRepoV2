@@ -1,8 +1,10 @@
 /**
  * RPC Caller Utility
- * Handles database connection via Hyperdrive and RPC invocation
+ * Handles database connection via Supabase client (through Hyperdrive) and RPC invocation
  * Implements retry logic and performance monitoring
  */
+
+import { createClient } from '@supabase/supabase-js';
 
 export interface RPCResult {
   status: 'pass' | 'warning' | 'critical' | 'HARD_FAIL' | 'error';
@@ -31,7 +33,7 @@ export interface RPCExecutionContext {
 }
 
 /**
- * Initialize database connection via Hyperdrive
+ * Initialize Supabase client using Hyperdrive connection
  */
 export async function initHyperdrive(
   env: any
@@ -44,7 +46,36 @@ export async function initHyperdrive(
     );
   }
 
-  return hyperdrive;
+  // Create Supabase client using Hyperdrive's connection string
+  // Hyperdrive provides connectionString property
+  const connectionString = hyperdrive.connectionString;
+  
+  // Extract host from connection string to build Supabase URL
+  // Format: postgres://user:pass@host:port/db
+  const match = connectionString.match(/postgres:\/\/[^@]+@([^:]+)/);
+  const host = match ? match[1] : null;
+  
+  if (!host) {
+    throw new Error('Could not extract host from Hyperdrive connection string');
+  }
+
+  // Build Supabase REST API URL from pooler host
+  // Convert: xyz.pooler.supabase.com -> https://xyz.supabase.co
+  const supabaseUrl = `https://${host.replace('.pooler.supabase.com', '.supabase.co')}`;
+  
+  // Use service role key from environment
+  const serviceRoleKey = env.SUPABASE_SERVICE_ROLE_KEY;
+  
+  if (!serviceRoleKey) {
+    throw new Error('SUPABASE_SERVICE_ROLE_KEY not configured');
+  }
+
+  return createClient(supabaseUrl, serviceRoleKey, {
+    auth: { persistSession: false },
+    db: {
+      schema: 'public'
+    }
+  });
 }
 /**
  * Execute a single RPC with retry logic and timeout
@@ -62,21 +93,44 @@ export async function executeRPC(
   
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      // Execute RPC with timeout
-      const result = await Promise.race([
-        client.query(rpc.query, [envName, ...rpc.params]),
-        new Promise((_, reject) =>
-          setTimeout(
-            () => reject(new Error(`RPC timeout after ${timeoutMs}ms`)),
+      // Execute RPC with timeout using Supabase client
+      const rpcName = rpc.name;
+      
+      // Build RPC parameters object based on the RPC signature
+      // For orchestrator: p_env_name, p_mode, p_trigger
+      // For individual checks: p_env_name, p_*_warn, p_*_critical, p_limit_rows, p_respect_fx_weekend
+      const rpcParams: Record<string, any> = {};
+      
+      if (rpcName === 'rpc_run_health_checks') {
+        // Orchestrator parameters
+        rpcParams.p_env_name = rpc.params[0];
+        rpcParams.p_mode = rpc.params[1];
+        rpcParams.p_trigger = rpc.params[2];
+      } else {
+        // Individual check parameters (generic mapping)
+        rpcParams.p_env_name = rpc.params[0];
+        if (rpc.params.length > 1) rpcParams.p_param1 = rpc.params[1];
+        if (rpc.params.length > 2) rpcParams.p_param2 = rpc.params[2];
+        if (rpc.params.length > 3) rpcParams.p_param3 = rpc.params[3];
+        if (rpc.params.length > 4) rpcParams.p_param4 = rpc.params[4];
+      }
+      
+      const { data, error } = await Promise.race([
+        client.rpc(rpcName, rpcParams),
+        new Promise((_, reject) =>\n          setTimeout(\n            () => reject(new Error(`RPC timeout after ${timeoutMs}ms`)),
             timeoutMs
           )
-        ),
+        ) as Promise<{ data: any; error: any }>,
       ]);
+      
+      if (error) {
+        throw new Error(error.message);
+      }
       
       const executionTime = performance.now() - startTime;
       
-      // RPC returns JSONB in first column
-      const rpcResult = result.rows[0] || {};
+      // Supabase RPC returns data directly (JSONB from function)
+      const rpcResult = data || {};
       
       return {
         ...(rpcResult as RPCResult),

@@ -54,6 +54,10 @@ importers:
         version: 3.114.16(@cloudflare/workers-types@4.20260108.0)
 
   apps/typescript/data-quality-validator:
+    dependencies:
+      '@supabase/supabase-js':
+        specifier: ^2.39.0
+        version: 2.90.0
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^4.20240916.0

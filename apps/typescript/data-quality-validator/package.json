@@ -11,7 +11,9 @@
     "deploy:prod": "wrangler deploy --env production",
     "test": "vitest"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0"
+  },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240916.0",
     "typescript": "^5.3.0",
