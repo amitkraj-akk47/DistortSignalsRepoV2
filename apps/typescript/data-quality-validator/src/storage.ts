@@ -182,20 +182,46 @@ export async function getHARDFAILAlerts(
 
 /**
  * Clean up old validation records (retention policy: 90 days)
+ * Cleans quality_workerhealth and quality_check_results tables
  */
 export async function cleanupOldValidationRecords(
   client: any,
   retentionDays = 90
 ): Promise<number> {
   try {
-    const query = `
-      DELETE FROM quality_data_validation
-      WHERE run_timestamp < NOW() - (($1 || ' days')::INTERVAL)
-    `;
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
+    const cutoffISO = cutoffDate.toISOString();
     
-    const result = await client.query(query, [retentionDays]);
-    console.info(`Cleaned up ${result.rowCount} old validation records`);
-    return result.rowCount;
+    // Delete old worker health records
+    const { data: healthData, error: healthError } = await client
+      .from('quality_workerhealth')
+      .delete()
+      .lt('created_at', cutoffISO)
+      .select('id');
+    
+    if (healthError) {
+      console.warn('Failed to cleanup quality_workerhealth:', healthError.message);
+    }
+    
+    // Delete old check results
+    const { data: resultsData, error: resultsError } = await client
+      .from('quality_check_results')
+      .delete()
+      .lt('created_at', cutoffISO)
+      .select('id');
+    
+    if (resultsError) {
+      console.warn('Failed to cleanup quality_check_results:', resultsError.message);
+    }
+    
+    const totalDeleted = (healthData?.length || 0) + (resultsData?.length || 0);
+    
+    if (totalDeleted > 0) {
+      console.info(`Cleaned up ${totalDeleted} old validation records`);
+    }
+    
+    return totalDeleted;
   } catch (error) {
     console.error('Failed to cleanup old validation records:', error);
     return 0;
