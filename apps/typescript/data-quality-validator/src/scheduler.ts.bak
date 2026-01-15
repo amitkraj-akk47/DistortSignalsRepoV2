@@ -1,0 +1,275 @@
+/**
+ * Scheduler
+ * Coordinates validation check execution based on cron triggers
+ * Single cron: */5 * * * * (every 5 minutes)
+ * Mode determined by minute: :00 and :30 = full mode, others = fast mode
+ */
+
+// UUID generator for Cloudflare Workers (using crypto.getRandomValues)
+function generateUUID(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+import {
+  executeRPCBatch,
+} from './rpc-caller';
+import { storeValidationBatch } from './storage';
+import type { ValidationRecord } from './storage';
+
+/**
+ * Determine execution mode based on UTC minute
+ * Every 5 minutes, but:
+ * - At :00 and :30 → full mode (all 9 checks)
+ * - Other times → fast mode (5 core checks)
+ */
+export function getModeFromTime(now = new Date()): 'fast' | 'full' {
+  const minute = now.getUTCMinutes();
+  
+  // Full mode at :00 and :30 (every 30 minutes)
+  if (minute % 30 === 0) {
+    return 'full';
+  }
+  
+  // Fast mode at all other 5-minute intervals
+  return 'fast';
+}
+
+/**
+ * Execute quick health validation suite
+ * Duration: ~5-10 seconds total, 3 RPCs
+ */
+export async function runQuickHealthValidation(
+  client: any,
+  envName: string
+): Promise<{
+  runId: string;
+  status: 'success' | 'partial' | 'failure';
+  totalDurationMs: number;
+  results: ValidationRecord[];
+}> {
+  const runId = generateUUID();
+  const startTime = performance.now();
+  
+  console.info(`[${runId}] Starting quick health validation (env: ${envName})`);
+  
+  const rpcs = getQuickHealthRPCs();
+  const rpcResults = await executeRPCBatch(client, rpcs, envName, 15000);
+  
+  // Convert RPC results to validation records
+  const records: ValidationRecord[] = Array.from(rpcResults.entries()).map(
+    ([rpcName, rpcResult]) => ({
+      run_id: runId,
+      run_timestamp: new Date().toISOString(),
+      env_name: envName,
+      validation_type: 'quick_health' as const,
+      check_category: rpcResult.check_category,
+      status: rpcResult.status,
+      severity_gate: rpcResult.status === 'HARD_FAIL' ? 'HARD_FAIL' : 'normal',
+      issue_count: rpcResult.issue_count,
+      result_summary: rpcResult.result_summary,
+      issue_details: rpcResult.issue_details,
+      execution_duration_ms: rpcResult.execution_time_ms || 0,
+    })
+  );
+  
+  // Store results
+  const { succeeded, failed } = await storeValidationBatch(client, records);
+  
+  const totalDurationMs = Math.round(performance.now() - startTime);
+  const hasHardFail = records.some((r) => r.severity_gate === 'HARD_FAIL');
+  
+  const status = failed > 0 ? 'failure' : hasHardFail ? 'partial' : 'success';
+  
+  console.info(
+    `[${runId}] Quick health validation complete (${totalDurationMs}ms): ${succeeded} stored, ${failed} failed${
+      hasHardFail ? ', HARD_FAIL detected' : ''
+    }`
+  );
+  
+  // HARD_FAIL Operational Behavior: Log for alerting
+  if (hasHardFail) {
+    console.error(`[${runId}] ⚠️ HARD_FAIL detected in quick health validation`);
+    // Optional: Send minimal Slack webhook here if configured
+  }
+  
+  return { runId, status, totalDurationMs, results: records };
+}
+
+/**
+ * Execute daily correctness validation suite
+ * Duration: ~15-20 seconds total, 6 RPCs
+ */
+export async function runDailyCorrectnessValidation(
+  client: any,
+  envName: string,
+  toleranceMode = 'strict'
+): Promise<{
+  runId: string;
+  status: 'success' | 'partial' | 'failure';
+  totalDurationMs: number;
+  results: ValidationRecord[];
+}> {
+  const runId = generateUUID();
+  const startTime = performance.now();
+  
+  console.info(
+    `[${runId}] Starting daily correctness validation (env: ${envName}, tolerance: ${toleranceMode})`
+  );
+  
+  const rpcs = getDailyCorrectnessRPCs(toleranceMode);
+  const rpcResults = await executeRPCBatch(client, rpcs, envName, 30000);
+  
+  // Convert RPC results to validation records
+  const records: ValidationRecord[] = Array.from(rpcResults.entries()).map(
+    ([rpcName, rpcResult]) => ({
+      run_id: runId,
+      run_timestamp: new Date().toISOString(),
+      env_name: envName,
+      validation_type: 'daily_correctness' as const,
+      check_category: rpcResult.check_category,
+      status: rpcResult.status,
+      severity_gate: rpcResult.status === 'HARD_FAIL' ? 'HARD_FAIL' : 'normal',
+      issue_count: rpcResult.issue_count,
+      result_summary: rpcResult.result_summary,
+      issue_details: rpcResult.issue_details,
+      execution_duration_ms: rpcResult.execution_time_ms || 0,
+    })
+  );
+  
+  // Store results
+  const { succeeded, failed } = await storeValidationBatch(client, records);
+  
+  const totalDurationMs = Math.round(performance.now() - startTime);
+  const hasHardFail = records.some((r) => r.severity_gate === 'HARD_FAIL');
+  
+  const status = failed > 0 ? 'failure' : hasHardFail ? 'partial' : 'success';
+  
+  console.info(
+    `[${runId}] Daily correctness validation complete (${totalDurationMs}ms): ${succeeded} stored, ${failed} failed${
+      hasHardFail ? ', HARD_FAIL detected' : ''
+    }`
+  );
+  
+  if (hasHardFail) {
+    console.error(`[${runId}] ⚠️ HARD_FAIL detected in daily correctness validation`);
+  }
+  
+  return { runId, status, totalDurationMs, results: records };
+}
+
+/**
+ * Execute weekly deep validation suite
+ * Duration: ~20-30 seconds total (conservative start: 4 weeks window)
+ * NOTE: Must monitor and potentially downgrade if performance degrades
+ */
+export async function runWeeklyDeepValidation(
+  client: any,
+  envName: string,
+  windowWeeks = 4
+): Promise<{
+  runId: string;
+  status: 'success' | 'partial' | 'failure';
+  totalDurationMs: number;
+  results: ValidationRecord[];
+}> {
+  const runId = generateUUID();
+  const startTime = performance.now();
+  
+  console.info(
+    `[${runId}] Starting weekly deep validation (env: ${envName}, window: ${windowWeeks} weeks)`
+  );
+  
+  const rpcs = getWeeklyDeepRPCs(windowWeeks);
+  const rpcResults = await executeRPCBatch(client, rpcs, envName, 45000);
+  
+  // Convert RPC results to validation records
+  const records: ValidationRecord[] = Array.from(rpcResults.entries()).map(
+    ([rpcName, rpcResult]) => ({
+      run_id: runId,
+      run_timestamp: new Date().toISOString(),
+      env_name: envName,
+      validation_type: 'weekly_deep' as const,
+      check_category: rpcResult.check_category,
+      status: rpcResult.status,
+      severity_gate: rpcResult.status === 'HARD_FAIL' ? 'HARD_FAIL' : 'normal',
+      issue_count: rpcResult.issue_count,
+      result_summary: rpcResult.result_summary,
+      issue_details: rpcResult.issue_details,
+      execution_duration_ms: rpcResult.execution_time_ms || 0,
+    })
+  );
+  
+  // Store results
+  const { succeeded, failed } = await storeValidationBatch(client, records);
+  
+  const totalDurationMs = Math.round(performance.now() - startTime);
+  const hasHardFail = records.some((r) => r.severity_gate === 'HARD_FAIL');
+  
+  const status = failed > 0 ? 'failure' : hasHardFail ? 'partial' : 'success';
+  
+  console.info(
+    `[${runId}] Weekly deep validation complete (${totalDurationMs}ms): ${succeeded} stored, ${failed} failed${
+      hasHardFail ? ', HARD_FAIL detected' : ''
+    }`
+  );
+  
+  // Performance monitoring: Log if exceeds thresholds
+  if (totalDurationMs > 30000) {
+    console.warn(
+      `[${runId}] ⚠️ Weekly deep validation exceeded 30s (${totalDurationMs}ms). Consider reducing window_weeks.`
+    );
+  }
+  
+  if (hasHardFail) {
+    console.error(`[${runId}] ⚠️ HARD_FAIL detected in weekly deep validation`);
+  }
+  
+  return { runId, status, totalDurationMs, results: records };
+}
+
+/**
+ * Helper: Determine and execute appropriate validation suite
+ */
+export async function runValidationSuite(
+  client: any,
+  envName: string
+): Promise<{
+  suite: string;
+  runId: string;
+  status: string;
+  totalDurationMs: number;
+  resultsCount: number;
+}> {
+  const { suite, description } = getValidationSuiteForTime();
+  
+  if (!suite) {
+    return {
+      suite: 'none',
+      runId: 'N/A',
+      status: 'skipped',
+      totalDurationMs: 0,
+      resultsCount: 0,
+    };
+  }
+  
+  let result;
+  
+  if (suite === 'quick_health') {
+    result = await runQuickHealthValidation(client, envName);
+  } else if (suite === 'daily_correctness') {
+    result = await runDailyCorrectnessValidation(client, envName);
+  } else {
+    result = await runWeeklyDeepValidation(client, envName);
+  }
+  
+  return {
+    suite,
+    runId: result.runId,
+    status: result.status,
+    totalDurationMs: result.totalDurationMs,
+    resultsCount: result.results.length,
+  };
+}

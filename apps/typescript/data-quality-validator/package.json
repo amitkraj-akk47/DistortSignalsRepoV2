@@ -1,0 +1,30 @@
+{
+  "name": "data-quality-validator",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker for continuous data quality validation via RPC suite",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "wrangler dev",
+    "deploy:staging": "wrangler deploy --env development",
+    "deploy:prod": "wrangler deploy --env production",
+    "test": "vitest",
+    "test:rpc": "npm run build && node --loader tsx ./tests/rpc-integration.test.ts"
+  },
+  "dependencies": {
+    "@types/node": "^20.0.0",
+    "postgres": "^0.4.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240916.0",
+    "@types/jest": "^29.0.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.0.0",
+    "wrangler": "^3.28.0",
+    "tsx": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -1,0 +1,34 @@
+name = "data-quality-validator"
+main = "src/index.ts"
+compatibility_date = "2024-12-16"
+
+[env.development]
+vars = { ENVIRONMENT = "development" }
+hyperdrive_binding = "HYPERDRIVE_DEV"
+
+[env.production]
+vars = { ENVIRONMENT = "production" }
+hyperdrive_binding = "HYPERDRIVE_PROD"
+
+# Hyperdrive binding (direct Postgres connection pooling)
+# MANDATORY: Must be configured with actual pool IDs from Supabase
+[[hyperdrive]]
+id = "dsdevdbhyperdrive"
+binding = "HYPERDRIVE"
+# Connection to: aws-1-ap-south-1.pooler.supabase.com:5432/postgres
+
+# Scheduled cron triggers - Single trigger every 5 minutes
+# Mode (fast/full) determined by minute offset: :00 and :30 = full, others = fast
+[[triggers.crons]]
+cron = "*/5 * * * *"  # Every 5 minutes (fast/full determined by timestamp)
+
+# Build configuration
+build = { command = "npm run build" }
+
+# Local development
+[local_protocol]
+https = false
+
+# Observability (optional, for production)
+[observability]
+enabled = false
