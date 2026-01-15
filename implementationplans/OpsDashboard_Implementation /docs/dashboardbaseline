@@ -1,0 +1,1225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DistortSignals - Master Operations Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #0a0e14;
+            color: #e6e6e6;
+            padding: 24px;
+            line-height: 1.5;
+            overflow-x: hidden;
+        }
+
+        .header {
+            margin-bottom: 24px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid #1a1f29;
+        }
+
+        .header-title {
+            font-size: 28px;
+            font-weight: 700;
+            color: #ffffff;
+            margin-bottom: 8px;
+        }
+
+        .header-meta {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            font-size: 13px;
+            color: #8a8a8a;
+        }
+
+        .live-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .live-dot {
+            width: 8px;
+            height: 8px;
+            background: #00ff88;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .summary-bar {
+            background: #151a23;
+            border-radius: 10px;
+            padding: 18px 24px;
+            border: 2px solid #1f252e;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 20px;
+            margin-bottom: 28px;
+        }
+
+        .summary-item {
+            text-align: center;
+        }
+
+        .summary-number {
+            font-size: 30px;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+
+        .summary-number.green { color: #00ff88; }
+        .summary-number.amber { color: #ffaa00; }
+        .summary-number.red { color: #ff4444; }
+        .summary-number.blue { color: #4a9eff; }
+
+        .summary-label {
+            font-size: 11px;
+            color: #6a7280;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .section {
+            margin-bottom: 36px;
+        }
+
+        .section-title {
+            font-size: 18px;
+            font-weight: 700;
+            color: #ffffff;
+            margin-bottom: 16px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #1a1f29;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .section-icon {
+            font-size: 22px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 14px;
+        }
+
+        .grid-2 {
+            grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+        }
+
+        .tile {
+            background: #151a23;
+            border-radius: 8px;
+            padding: 18px;
+            border: 2px solid #1f252e;
+            transition: all 0.2s ease;
+            cursor: pointer;
+        }
+
+        .tile:hover {
+            border-color: #2a3240;
+            transform: translateY(-1px);
+        }
+
+        .tile.green { border-left: 4px solid #00ff88; }
+        .tile.amber { border-left: 4px solid #ffaa00; }
+        .tile.red { border-left: 4px solid #ff4444; }
+
+        .tile-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 14px;
+        }
+
+        .tile-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #ffffff;
+            line-height: 1.3;
+        }
+
+        .status-badge {
+            padding: 4px 9px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            flex-shrink: 0;
+        }
+
+        .status-badge.green {
+            background: rgba(0, 255, 136, 0.2);
+            color: #00ff88;
+        }
+
+        .status-badge.amber {
+            background: rgba(255, 170, 0, 0.2);
+            color: #ffaa00;
+        }
+
+        .status-badge.red {
+            background: rgba(255, 68, 68, 0.2);
+            color: #ff4444;
+        }
+
+        .status-badge.blue {
+            background: rgba(74, 158, 255, 0.2);
+            color: #4a9eff;
+        }
+
+        .metrics-row {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 9px;
+            margin-bottom: 11px;
+        }
+
+        .metric {
+            background: #0d1117;
+            padding: 9px;
+            border-radius: 5px;
+            border: 1px solid #1f252e;
+        }
+
+        .metric-label {
+            font-size: 9px;
+            color: #6a7280;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            margin-bottom: 3px;
+        }
+
+        .metric-value {
+            font-size: 16px;
+            font-weight: 600;
+            color: #ffffff;
+        }
+
+        .metric-value.success { color: #00ff88; }
+        .metric-value.warning { color: #ffaa00; }
+        .metric-value.error { color: #ff4444; }
+        .metric-value.info { color: #4a9eff; }
+
+        .heartbeat {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            padding: 7px;
+            background: #0d1117;
+            border-radius: 5px;
+            margin-top: 8px;
+            font-size: 10px;
+            color: #8a8a8a;
+        }
+
+        .heartbeat-icon {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        .heartbeat-icon.alive { background: #00ff88; }
+        .heartbeat-icon.degraded { background: #ffaa00; }
+
+        .compact-list {
+            background: #0d1117;
+            border: 1px solid #1f252e;
+            border-radius: 5px;
+            padding: 10px;
+            max-height: 180px;
+            overflow-y: auto;
+            font-size: 11px;
+        }
+
+        .compact-list-item {
+            padding: 6px;
+            border-bottom: 1px solid #1a1f29;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .compact-list-item:last-child {
+            border-bottom: none;
+        }
+
+        .item-name {
+            color: #ffffff;
+            font-weight: 500;
+        }
+
+        .item-status {
+            font-size: 9px;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-weight: 600;
+        }
+
+        .item-status.forming { background: rgba(74, 158, 255, 0.2); color: #4a9eff; }
+        .item-status.armed { background: rgba(255, 170, 0, 0.2); color: #ffaa00; }
+        .item-status.open { background: rgba(74, 158, 255, 0.2); color: #4a9eff; }
+        .item-status.closed { background: rgba(0, 255, 136, 0.2); color: #00ff88; }
+
+        .alert-banner {
+            background: linear-gradient(135deg, #ff4444 0%, #cc0000 100%);
+            border-radius: 10px;
+            padding: 14px 20px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .alert-icon {
+            font-size: 22px;
+        }
+
+        .alert-content {
+            flex: 1;
+        }
+
+        .alert-title {
+            font-weight: 600;
+            font-size: 14px;
+            margin-bottom: 3px;
+        }
+
+        .alert-message {
+            font-size: 12px;
+            opacity: 0.9;
+        }
+
+        .timeline-mini {
+            background: #0d1117;
+            border: 1px solid #1f252e;
+            border-radius: 5px;
+            padding: 8px;
+            margin-top: 8px;
+        }
+
+        .timeline-bar {
+            position: relative;
+            height: 28px;
+            background: #1a1f29;
+            border-radius: 4px;
+            overflow: hidden;
+            display: flex;
+        }
+
+        .timeline-segment {
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 9px;
+            font-weight: 600;
+            border-left: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .timeline-segment.london {
+            background: rgba(74, 158, 255, 0.3);
+            flex: 1;
+            color: #4a9eff;
+        }
+
+        .timeline-segment.us {
+            background: rgba(0, 255, 136, 0.3);
+            flex: 1.2;
+            color: #00ff88;
+        }
+
+        .event-mini {
+            display: flex;
+            gap: 8px;
+            padding: 6px;
+            border-bottom: 1px solid #1a1f29;
+            font-size: 11px;
+        }
+
+        .event-time {
+            color: #6a7280;
+            min-width: 38px;
+            font-weight: 600;
+            font-size: 10px;
+        }
+
+        .event-title {
+            color: #ffffff;
+            flex: 1;
+            font-size: 11px;
+        }
+
+        .event-impact {
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 9px;
+            font-weight: 600;
+        }
+
+        .event-impact.high { background: rgba(255, 68, 68, 0.2); color: #ff4444; }
+        .event-impact.medium { background: rgba(255, 170, 0, 0.2); color: #ffaa00; }
+
+        @media (max-width: 1400px) {
+            .grid { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+            .grid-2 { grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); }
+        }
+
+        @media (max-width: 768px) {
+            .grid, .grid-2 { grid-template-columns: 1fr; }
+            .summary-bar { grid-template-columns: repeat(2, 1fr); }
+        }
+
+        .footer-timestamp {
+            text-align: center;
+            padding: 16px;
+            font-size: 11px;
+            color: #6a7280;
+            border-top: 1px solid #1a1f29;
+            margin-top: 24px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-title">DistortSignals Operations Dashboard</div>
+        <div class="header-meta">
+            <div class="live-indicator">
+                <div class="live-dot"></div>
+                <span>Live Monitoring</span>
+            </div>
+            <span>|</span>
+            <span>Last Updated: <strong id="currentTime">--:--:-- UTC</strong></span>
+            <span>|</span>
+            <span>Environment: <strong>Production</strong></span>
+        </div>
+    </div>
+
+    <div class="alert-banner">
+        <div class="alert-icon">⚠️</div>
+        <div class="alert-content">
+            <div class="alert-title">1 Critical Alert Active</div>
+            <div class="alert-message">Circuit breaker open on FTMO-001 • High-impact NFP event at 14:30 UTC</div>
+        </div>
+    </div>
+
+    <div class="summary-bar">
+        <div class="summary-item">
+            <div class="summary-number green">24</div>
+            <div class="summary-label">Systems Healthy</div>
+        </div>
+        <div class="summary-item">
+            <div class="summary-number amber">3</div>
+            <div class="summary-label">Warnings</div>
+        </div>
+        <div class="summary-item">
+            <div class="summary-number red">1</div>
+            <div class="summary-label">Critical</div>
+        </div>
+        <div class="summary-item">
+            <div class="summary-number blue">8</div>
+            <div class="summary-label">Signals Forming</div>
+        </div>
+        <div class="summary-item">
+            <div class="summary-number blue">3</div>
+            <div class="summary-label">Trades Open</div>
+        </div>
+        <div class="summary-item">
+            <div class="summary-number green">+$178</div>
+            <div class="summary-label">P&L Today</div>
+        </div>
+    </div>
+
+    <!-- INFRASTRUCTURE HEALTH -->
+    <div class="section">
+        <div class="section-title">
+            <span class="section-icon">🏗️</span>
+            Infrastructure Health & Heartbeats
+        </div>
+        <div class="grid">
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Supabase Database</div>
+                    <div class="status-badge green">Healthy</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Connection Pool</div>
+                        <div class="metric-value success">24/50</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Query Latency</div>
+                        <div class="metric-value">8ms</div>
+                    </div>
+                </div>
+                <div class="heartbeat">
+                    <div class="heartbeat-icon alive"></div>
+                    <span>Last heartbeat: 2s ago • Health: PASS</span>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Cloudflare Workers</div>
+                    <div class="status-badge green">Operational</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Active Workers</div>
+                        <div class="metric-value success">8/8</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Requests/min</div>
+                        <div class="metric-value info">247</div>
+                    </div>
+                </div>
+                <div class="heartbeat">
+                    <div class="heartbeat-icon alive"></div>
+                    <span>Last heartbeat: 5s ago • All responding</span>
+                </div>
+            </div>
+
+            <div class="tile amber">
+                <div class="tile-header">
+                    <div class="tile-title">Massive.com Infrastructure</div>
+                    <div class="status-badge amber">Degraded</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Latest Response</div>
+                        <div class="metric-value success">✓ 180ms</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Current Status</div>
+                        <div class="metric-value warning">Slow</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">1h Success (120 req)</div>
+                        <div class="metric-value warning">92.5%</div>
+                        <div style="margin-top: 4px; height: 3px; background: #1a1f29; border-radius: 2px; overflow: hidden;">
+                            <div style="height: 100%; width: 92.5%; background: #ffaa00;"></div>
+                        </div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">24h Success (2,880 req)</div>
+                        <div class="metric-value warning">88.3%</div>
+                        <div style="margin-top: 4px; height: 3px; background: #1a1f29; border-radius: 2px; overflow: hidden;">
+                            <div style="height: 100%; width: 88.3%; background: #ff4444;"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="heartbeat">
+                    <div class="heartbeat-icon degraded"></div>
+                    <span>Last req: 8s ago • 111/120 successful (9 timeouts) in last hour</span>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Python Service</div>
+                    <div class="status-badge green">Running</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Memory Usage</div>
+                        <div class="metric-value">342 MB</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Uptime</div>
+                        <div class="metric-value info">6h 23m</div>
+                    </div>
+                </div>
+                <div class="heartbeat">
+                    <div class="heartbeat-icon alive"></div>
+                    <span>Last heartbeat: 3s ago • Process OK</span>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">MQL5 Runtime</div>
+                    <div class="status-badge green">Connected</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">MT5 Connection</div>
+                        <div class="metric-value success">Active</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Expert Advisors</div>
+                        <div class="metric-value success">3/3</div>
+                    </div>
+                </div>
+                <div class="heartbeat">
+                    <div class="heartbeat-icon alive"></div>
+                    <span>Last heartbeat: 1s ago • MT5 bridge OK</span>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Market Data Ingestion</div>
+                    <div class="status-badge green">Streaming</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Assets Streaming</div>
+                        <div class="metric-value success">28/28</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Latest Ingest</div>
+                        <div class="metric-value success">✓ OK</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">1h Success (1,680 bars)</div>
+                        <div class="metric-value success">99.8%</div>
+                        <div style="margin-top: 4px; height: 3px; background: #1a1f29; border-radius: 2px; overflow: hidden;">
+                            <div style="height: 100%; width: 99.8%; background: #00ff88;"></div>
+                        </div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">24h Success (40,320 bars)</div>
+                        <div class="metric-value success">99.1%</div>
+                        <div style="margin-top: 4px; height: 3px; background: #1a1f29; border-radius: 2px; overflow: hidden;">
+                            <div style="height: 100%; width: 99.1%; background: #00ff88;"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="heartbeat">
+                    <div class="heartbeat-icon alive"></div>
+                    <span>Last bar: 2s ago • 1,677/1,680 bars successful in last hour</span>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Data Quality</div>
+                    <div class="status-badge green">Validated</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Latest Check</div>
+                        <div class="metric-value success">✓ Pass</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Rejected Bars</div>
+                        <div class="metric-value success">0</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">1h Quality (1,680 bars)</div>
+                        <div class="metric-value success">100%</div>
+                        <div style="margin-top: 4px; height: 3px; background: #1a1f29; border-radius: 2px; overflow: hidden;">
+                            <div style="height: 100%; width: 100%; background: #00ff88;"></div>
+                        </div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">24h Quality (40,320 bars)</div>
+                        <div class="metric-value success">99.9%</div>
+                        <div style="margin-top: 4px; height: 3px; background: #1a1f29; border-radius: 2px; overflow: hidden;">
+                            <div style="height: 100%; width: 99.9%; background: #00ff88;"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="heartbeat">
+                    <div class="heartbeat-icon alive"></div>
+                    <span>Last check: 3s ago • 1,680/1,680 bars passed validation in last hour</span>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Aggregation Engine</div>
+                    <div class="status-badge green">Processing</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">5m / 1h TFs</div>
+                        <div class="metric-value success">100%</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Latest Run</div>
+                        <div class="metric-value success">✓ OK</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">1h Completeness (336 agg)</div>
+                        <div class="metric-value success">99.6%</div>
+                        <div style="margin-top: 4px; height: 3px; background: #1a1f29; border-radius: 2px; overflow: hidden;">
+                            <div style="height: 100%; width: 99.6%; background: #00ff88;"></div>
+                        </div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">24h Completeness (8,064 agg)</div>
+                        <div class="metric-value success">98.9%</div>
+                        <div style="margin-top: 4px; height: 3px; background: #1a1f29; border-radius: 2px; overflow: hidden;">
+                            <div style="height: 100%; width: 98.9%; background: #00ff88;"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="heartbeat">
+                    <div class="heartbeat-icon alive"></div>
+                    <span>Last run: 4s ago • 335/336 successful aggregations in last hour</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- SIGNAL GENERATION -->
+    <div class="section">
+        <div class="section-title">
+            <span class="section-icon">⚡</span>
+            Signal Generation & Management
+        </div>
+        <div class="grid">
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Indicator Management</div>
+                    <div class="status-badge green">Healthy</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Active Indicators</div>
+                        <div class="metric-value success">24/24</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Calc Time</div>
+                        <div class="metric-value">45ms</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Cache Hit Rate</div>
+                        <div class="metric-value success">94%</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Failed Calcs</div>
+                        <div class="metric-value success">0</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Strategy Runner</div>
+                    <div class="status-badge green">Operational</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Active Strategies</div>
+                        <div class="metric-value success">12/12</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Last Scan</div>
+                        <div class="metric-value info">2s ago</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Execution Time</div>
+                        <div class="metric-value">320ms</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Errors Today</div>
+                        <div class="metric-value success">0</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Signal States</div>
+                    <div class="status-badge green">Tracking</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Forming</div>
+                        <div class="metric-value info">8</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Armed</div>
+                        <div class="metric-value warning">3</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Triggered</div>
+                        <div class="metric-value success">12</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Terminal</div>
+                        <div class="metric-value">120</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Forming Signals</div>
+                    <div class="status-badge blue">8 Active</div>
+                </div>
+                <div class="compact-list">
+                    <div class="compact-list-item">
+                        <span class="item-name">EURUSD - London BO</span>
+                        <span class="item-status forming">FORMING</span>
+                    </div>
+                    <div class="compact-list-item">
+                        <span class="item-name">GBPUSD - Judas Swing</span>
+                        <span class="item-status forming">FORMING</span>
+                    </div>
+                    <div class="compact-list-item">
+                        <span class="item-name">USDJPY - Reversal</span>
+                        <span class="item-status forming">FORMING</span>
+                    </div>
+                    <div class="compact-list-item">
+                        <span class="item-name">AUDUSD - Breakout</span>
+                        <span class="item-status forming">FORMING</span>
+                    </div>
+                    <div class="compact-list-item">
+                        <span class="item-name">GBPJPY - London BO</span>
+                        <span class="item-status armed">ARMED</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Signal Outbox</div>
+                    <div class="status-badge green">Flowing</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Backlog</div>
+                        <div class="metric-value success">0</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Signals Today</div>
+                        <div class="metric-value info">143</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Avg Age</div>
+                        <div class="metric-value">2.4s</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Expired</div>
+                        <div class="metric-value success">0</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- SIGNAL CLAIMS & ORCHESTRATION -->
+    <div class="section">
+        <div class="section-title">
+            <span class="section-icon">📊</span>
+            Signal Claims & Trade Orchestration
+        </div>
+        <div class="grid">
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Claims Overview</div>
+                    <div class="status-badge green">Healthy</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Active Consumers</div>
+                        <div class="metric-value success">4/4</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Claim Latency</div>
+                        <div class="metric-value">0.3s</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Claims Today</div>
+                        <div class="metric-value info">143</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Success Rate</div>
+                        <div class="metric-value success">100%</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Trade Director</div>
+                    <div class="status-badge green">Operational</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Signals Processed</div>
+                        <div class="metric-value info">8</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Decisions Made</div>
+                        <div class="metric-value info">8</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Execution Rate</div>
+                        <div class="metric-value success">67%</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Errors</div>
+                        <div class="metric-value success">0</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Orchestration Flow</div>
+                    <div class="status-badge green">Flowing</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Claimed</div>
+                        <div class="metric-value info">8</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Evaluating</div>
+                        <div class="metric-value warning">2</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Executed</div>
+                        <div class="metric-value success">4</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Rejected</div>
+                        <div class="metric-value">2</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Recent Decisions</div>
+                    <div class="status-badge green">4 Executed</div>
+                </div>
+                <div class="compact-list">
+                    <div class="compact-list-item">
+                        <span class="item-name">EURUSD London BO</span>
+                        <span style="color: #00ff88; font-size: 10px; font-weight: 600;">✓ EXECUTED</span>
+                    </div>
+                    <div class="compact-list-item">
+                        <span class="item-name">GBPUSD Judas Swing</span>
+                        <span style="color: #00ff88; font-size: 10px; font-weight: 600;">✓ EXECUTED</span>
+                    </div>
+                    <div class="compact-list-item">
+                        <span class="item-name">USDJPY Reversal</span>
+                        <span style="color: #8a8a8a; font-size: 10px; font-weight: 600;">✗ REJECTED</span>
+                    </div>
+                    <div class="compact-list-item">
+                        <span class="item-name">AUDUSD Breakout</span>
+                        <span style="color: #00ff88; font-size: 10px; font-weight: 600;">✓ EXECUTED</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- TRADE EXECUTION -->
+    <div class="section">
+        <div class="section-title">
+            <span class="section-icon">💰</span>
+            Trade Execution & Performance
+        </div>
+        <div class="grid">
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Execution Performance</div>
+                    <div class="status-badge green">Operational</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Directives Sent</div>
+                        <div class="metric-value info">12</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Success Rate</div>
+                        <div class="metric-value success">92%</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Avg Execute</div>
+                        <div class="metric-value">1.2s</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Rejections</div>
+                        <div class="metric-value warning">1</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Trade States</div>
+                    <div class="status-badge green">Tracking</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Open</div>
+                        <div class="metric-value info">3</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Pending</div>
+                        <div class="metric-value warning">1</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Closed</div>
+                        <div class="metric-value success">6</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Terminal</div>
+                        <div class="metric-value">2</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Active Trades</div>
+                    <div class="status-badge blue">3 Open</div>
+                </div>
+                <div class="compact-list">
+                    <div class="compact-list-item">
+                        <span class="item-name">EURUSD London BO</span>
+                        <span style="color: #00ff88; font-size: 11px; font-weight: 600;">+$23.40</span>
+                    </div>
+                    <div class="compact-list-item">
+                        <span class="item-name">GBPUSD Judas</span>
+                        <span style="color: #ff4444; font-size: 11px; font-weight: 600;">-$8.20</span>
+                    </div>
+                    <div class="compact-list-item">
+                        <span class="item-name">AUDUSD Breakout</span>
+                        <span style="color: #00ff88; font-size: 11px; font-weight: 600;">+$15.70</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Today's Performance</div>
+                    <div class="status-badge green">Profitable</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Trades</div>
+                        <div class="metric-value info">8</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Win Rate</div>
+                        <div class="metric-value success">75%</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Realized P&L</div>
+                        <div class="metric-value success">+$147</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Unrealized</div>
+                        <div class="metric-value success">+$31</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Risk Management</div>
+                    <div class="status-badge green">Within Limits</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Daily Risk Used</div>
+                        <div class="metric-value success">1.2%</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Max Drawdown</div>
+                        <div class="metric-value success">0.8%</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Risk:Reward</div>
+                        <div class="metric-value info">1:2.4</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Position Size</div>
+                        <div class="metric-value success">OK</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- SHADOW TRADING -->
+    <div class="section">
+        <div class="section-title">
+            <span class="section-icon">🧪</span>
+            Shadow Trading - Strategy Testing
+        </div>
+        <div class="grid">
+            <div class="tile amber">
+                <div class="tile-header">
+                    <div class="tile-title">Momentum V2</div>
+                    <div class="status-badge amber">Testing</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Trades</div>
+                        <div class="metric-value info">24</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Win Rate</div>
+                        <div class="metric-value warning">58%</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">P&L</div>
+                        <div class="metric-value error">-$34</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Runtime</div>
+                        <div class="metric-value">3d 4h</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Range Trader</div>
+                    <div class="status-badge green">Testing</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Trades</div>
+                        <div class="metric-value info">31</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Win Rate</div>
+                        <div class="metric-value success">71%</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">P&L</div>
+                        <div class="metric-value success">+$127</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Runtime</div>
+                        <div class="metric-value">5d 12h</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">News Trader</div>
+                    <div class="status-badge green">Testing</div>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric">
+                        <div class="metric-label">Trades</div>
+                        <div class="metric-value info">8</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Win Rate</div>
+                        <div class="metric-value success">88%</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">P&L</div>
+                        <div class="metric-value success">+$94</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Runtime</div>
+                        <div class="metric-value">2d 8h</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- MARKETS & EVENTS -->
+    <div class="section">
+        <div class="section-title">
+            <span class="section-icon">🌍</span>
+            Markets & Events Calendar
+        </div>
+        <div class="grid grid-2">
+            <div class="tile green">
+                <div class="tile-header">
+                    <div class="tile-title">Active Trading Sessions</div>
+                    <div class="status-badge green">2 Active</div>
+                </div>
+                <div class="timeline-mini">
+                    <div class="timeline-bar">
+                        <div class="timeline-segment london">LONDON</div>
+                        <div class="timeline-segment us">US SESSION</div>
+                    </div>
+                </div>
+                <div style="margin-top: 12px; padding: 10px; background: #0d1117; border-radius: 5px; border: 1px solid #1f252e; font-size: 11px;">
+                    <div style="color: #6a7280; margin-bottom: 4px;">CURRENT OVERLAP</div>
+                    <div style="color: #00ff88; font-weight: 600; font-size: 14px;">London + US • Peak Trading</div>
+                    <div style="color: #8a8a8a; margin-top: 4px;">High liquidity • Tight spreads</div>
+                </div>
+            </div>
+
+            <div class="tile amber">
+                <div class="tile-header">
+                    <div class="tile-title">High-Impact Events Today</div>
+                    <div class="status-badge amber">3 Events</div>
+                </div>
+                <div class="compact-list">
+                    <div class="event-mini">
+                        <div class="event-time">14:30</div>
+                        <div class="event-title">🇺🇸 US Non-Farm Payrolls</div>
+                        <div class="event-impact high">HIGH</div>
+                    </div>
+                    <div class="event-mini">
+                        <div class="event-time">14:30</div>
+                        <div class="event-title">🇺🇸 US Unemployment Rate</div>
+                        <div class="event-impact high">HIGH</div>
+                    </div>
+                    <div class="event-mini">
+                        <div class="event-time">15:45</div>
+                        <div class="event-title">🇺🇸 Flash Services PMI</div>
+                        <div class="event-impact high">HIGH</div>
+                    </div>
+                    <div class="event-mini">
+                        <div class="event-time">17:00</div>
+                        <div class="event-title">🇺🇸 Fed Chair Powell Speech</div>
+                        <div class="event-impact high">HIGH</div>
+                    </div>
+                </div>
+                <div style="margin-top: 10px; padding: 9px; background: rgba(255, 170, 0, 0.1); border-radius: 5px; border-left: 3px solid #ffaa00; font-size: 11px;">
+                    <strong style="color: #ffaa00;">⚠️ High Volatility Expected</strong><br/>
+                    <span style="color: #8a8a8a;">Reduce position sizes 30min before NFP</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer-timestamp">
+        Dashboard Auto-Refresh: Every 5 seconds • All times in UTC • Last update: <span id="footerTime">--:--:--</span>
+    </div>
+
+    <script>
+        function updateTime() {
+            const now = new Date();
+            const timeString = now.toISOString().split('T')[1].split('.')[0] + ' UTC';
+            document.getElementById('currentTime').textContent = timeString;
+            document.getElementById('footerTime').textContent = timeString;
+        }
+
+        updateTime();
+        setInterval(updateTime, 1000);
+
+        // Simulate auto-refresh
+        setInterval(() => {
+            console.log('Dashboard data refreshed');
+        }, 5000);
+    </script>
+</body>
+</html>

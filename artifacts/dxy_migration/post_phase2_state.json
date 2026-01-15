@@ -1,0 +1,17 @@
+{
+  "timestamp": "2026-01-13T11:01:44.409778+00:00",
+  "constraints": [
+    {
+      "conname": "bars_provider_ticker_required_chk",
+      "definition": "CHECK (((source <> 'massive'::text) OR (provider_ticker IS NOT NULL)))"
+    },
+    {
+      "conname": "bars_timeframe_check",
+      "definition": "CHECK ((timeframe = ANY (ARRAY['1m'::text, '5m'::text, '1h'::text, '2h'::text, '4h'::text])))"
+    },
+    {
+      "conname": "data_bars_symbol_tf_ts_unique",
+      "definition": "UNIQUE (canonical_symbol, timeframe, ts_utc)"
+    }
+  ]
+}

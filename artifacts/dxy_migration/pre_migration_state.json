@@ -1,0 +1,13 @@
+{
+  "timestamp": "2026-01-13T10:57:49.460038+00:00",
+  "data_bars": {
+    "total": 144965,
+    "dxy_1m": 0
+  },
+  "derived_data_bars": {
+    "total": 4664,
+    "dxy_1m_active": 4648,
+    "dxy_5m_active": 2,
+    "dxy_1h_active": 0
+  }
+}

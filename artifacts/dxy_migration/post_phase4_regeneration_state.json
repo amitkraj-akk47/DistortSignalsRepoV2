@@ -1,0 +1,20 @@
+{
+  "timestamp": "2026-01-13T11:13:39.619322+00:00",
+  "regeneration_method": "calc_dxy_range_1m",
+  "regeneration_info": {
+    "start_date": "2025-12-31 00:00:00+00",
+    "end_date": "2026-01-13 11:09:00+00:00",
+    "bars_inserted": 11839,
+    "bars_updated": 0,
+    "bars_skipped": 168,
+    "total_in_data_bars": 11839
+  },
+  "dxy_summary": [
+    {
+      "canonical_symbol": "DXY",
+      "bar_count": 11839,
+      "earliest": "2025-12-31 00:00:00+00",
+      "latest": "2026-01-13 11:08:00+00"
+    }
+  ]
+}

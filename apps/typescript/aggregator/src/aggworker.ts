@@ -1,5 +1,49 @@
 import { createClient } from "@supabase/supabase-js";
 
+type HealthStatus = "pass" | "warning" | "critical" | "error";
+
+interface HealthRecord {
+  env_name: string;
+  worker_name: string;
+  run_id: string;
+  run_ts: string;
+  scheduled_for_ts?: string;
+  status: HealthStatus;
+  duration_ms: number;
+  last_success_ts?: string | null;
+  last_error_ts?: string | null;
+  error_count: number;
+  error_samples?: unknown;
+  metrics?: unknown;
+}
+
+interface IssueRecord {
+  env_name: string;
+  worker_name: string;
+  severity: HealthStatus;
+  code?: string;
+  message?: string;
+  context?: unknown;
+}
+
+async function writeHealthRecord(supabase: ReturnType<typeof createClient>, record: HealthRecord) {
+  const { error } = await supabase.from("quality_workerhealth").insert(record);
+  if (error) console.error("[AGG] Failed to write health record", error.message ?? error);
+}
+
+async function writeIssueRecord(supabase: ReturnType<typeof createClient>, record: IssueRecord) {
+  const { error } = await supabase.from("ops_issues").insert({
+    env_name: record.env_name,
+    worker_name: record.worker_name,
+    severity: record.severity,
+    event_ts: new Date().toISOString(),
+    code: record.code,
+    message: record.message,
+    context: record.context,
+  });
+  if (error) console.error("[AGG] Failed to write ops issue", error.message ?? error);
+}
+
 export interface Env {
   SUPABASE_URL: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
@@ -29,26 +73,87 @@ function isTransientError(e: any): boolean {
 }
 
 export default {
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     const startTime = Date.now();
-    console.log(`[AGGREGATOR] Cron triggered at ${new Date().toISOString()}`);
+    const runId = crypto.randomUUID();
+    const runTsIso = new Date(startTime).toISOString();
+    const scheduledFor = event?.scheduledTime ? new Date(event.scheduledTime).toISOString() : undefined;
+    const envName = (env.ENV_NAME ?? "DEV").toUpperCase();
+    const workerName = "aggregation";
+
+    const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { persistSession: false },
+    });
+
+    console.log(`[AGGREGATOR] Cron triggered at ${runTsIso}`);
     
     ctx.waitUntil(
-      runAggregation(env).then(() => {
-        const duration = Date.now() - startTime;
-        console.log(`[AGGREGATOR] Completed in ${duration}ms`);
-      }).catch((e) => {
-        const duration = Date.now() - startTime;
-        console.error(`[AGGREGATOR] Failed after ${duration}ms:`, e);
-      })
+      runAggregation(env, supabase, runId)
+        .then(async (result) => {
+          const duration = Date.now() - startTime;
+          console.log(`[AGGREGATOR] Completed in ${duration}ms`);
+          await writeHealthRecord(supabase, {
+            env_name: envName,
+            worker_name: workerName,
+            run_id: runId,
+            run_ts: runTsIso,
+            scheduled_for_ts: scheduledFor,
+            status: result.status,
+            duration_ms: duration,
+            last_success_ts: result.last_success_ts ?? null,
+            last_error_ts: result.last_error_ts ?? null,
+            error_count: result.error_count,
+            error_samples: result.error_samples,
+            metrics: result.metrics,
+          });
+        })
+        .catch(async (e) => {
+          const duration = Date.now() - startTime;
+          console.error(`[AGGREGATOR] Failed after ${duration}ms:`, e);
+          const errMsg = String(e?.message ?? e);
+          await writeHealthRecord(supabase, {
+            env_name: envName,
+            worker_name: workerName,
+            run_id: runId,
+            run_ts: runTsIso,
+            scheduled_for_ts: scheduledFor,
+            status: "error",
+            duration_ms: duration,
+            last_success_ts: null,
+            last_error_ts: new Date().toISOString(),
+            error_count: 1,
+            error_samples: [errMsg],
+            metrics: { message: errMsg },
+          });
+          await writeIssueRecord(supabase, {
+            env_name: envName,
+            worker_name: workerName,
+            severity: "critical",
+            code: "AGG_SCHEDULED_FAIL",
+            message: errMsg,
+            context: { duration_ms: duration, run_id: runId },
+          });
+        })
     );
   },
 };
 
-async function runAggregation(env: Env): Promise<void> {
+async function runAggregation(
+  env: Env,
+  supabase: ReturnType<typeof createClient>,
+  runId: string
+): Promise<{
+  status: HealthStatus;
+  error_count: number;
+  error_samples: string[];
+  metrics: Record<string, number>;
+  last_success_ts: string | null;
+  last_error_ts: string | null;
+}> {
   const envName = (env.ENV_NAME ?? "DEV").toUpperCase();
   const jobName = env.JOB_NAME ?? "agg-master";
   const trigger = env.TRIGGER ?? "cron";
+  const workerName = "aggregation";
 
   const maxTasks = Number(env.MAX_TASKS_PER_RUN ?? "20");
   const maxWindows = Number(env.MAX_WINDOWS_PER_TASK ?? "100");
@@ -58,11 +163,6 @@ async function runAggregation(env: Env): Promise<void> {
 
   console.log(`[AGG] Starting: env=${envName} job=${jobName} maxTasks=${maxTasks}`);
 
-  const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { persistSession: false },
-  });
-
-  const runId = crypto.randomUUID();
   console.log(`[AGG] Run ID: ${runId}`);
 
   await supabase.rpc("ops_runlog_start", {
@@ -85,6 +185,9 @@ async function runAggregation(env: Env): Promise<void> {
     p_running_stale_seconds: runningStaleSeconds,
   });
 
+  let errorCount = 0;
+  const errorSamples: string[] = [];
+
   if (tasksErr) {
     console.error(`[AGG] Failed to get tasks:`, tasksErr);
     await supabase.rpc("ops_runlog_finish", {
@@ -92,7 +195,16 @@ async function runAggregation(env: Env): Promise<void> {
       p_status: "failed",
       p_stats: { error: String(tasksErr.message ?? tasksErr) },
     });
-    return;
+    errorCount += 1;
+    errorSamples.push(String(tasksErr.message ?? tasksErr));
+    return {
+      status: "critical",
+      error_count: errorCount,
+      error_samples: errorSamples,
+      metrics: { tasks: 0, bars_created: 0, bars_quality_poor: 0 },
+      last_success_ts: null,
+      last_error_ts: new Date().toISOString(),
+    };
   }
 
   console.log(`[AGG] Found ${tasks?.length ?? 0} due tasks`);
@@ -165,15 +277,26 @@ async function runAggregation(env: Env): Promise<void> {
       });
     } catch (e: any) {
       const transient = isTransientError(e);
+      const errMsg = String(e?.message ?? e);
+      errorCount += 1;
+      errorSamples.push(errMsg);
       await supabase.rpc("agg_finish", {
         p_symbol: symbol,
         p_tf: toTf,
         p_success: false,
         p_fail_kind: transient ? "transient" : "hard",
-        p_error: String(e?.message ?? e),
-        p_stats: { error: String(e?.message ?? e) },
+        p_error: errMsg,
+        p_stats: { error: errMsg },
         p_now_utc: new Date().toISOString(),
         p_auto_disable_hard_fail_threshold: autoDisableHardFails,
+      });
+      await writeIssueRecord(supabase, {
+        env_name: envName,
+        worker_name: workerName,
+        severity: transient ? "warning" : "critical",
+        code: transient ? "AGG_TRANSIENT" : "AGG_HARD_FAIL",
+        message: errMsg,
+        context: { symbol, timeframe: toTf, run_id: runId },
       });
     }
   }
@@ -187,4 +310,19 @@ async function runAggregation(env: Env): Promise<void> {
   });
 
   console.log(`[AGG] Completed: ${totalCreated} bars created, ${totalPoor} poor quality, ${tasks?.length ?? 0} tasks processed`);
+  const status: HealthStatus = errorCount > 0 ? "warning" : "pass";
+  const nowIso = new Date().toISOString();
+  return {
+    status,
+    error_count: errorCount,
+    error_samples: errorSamples,
+    metrics: {
+      bars_created: totalCreated,
+      bars_quality_poor: totalPoor,
+      tasks: tasks?.length ?? 0,
+      errors: errorCount,
+    },
+    last_success_ts: status === "pass" ? nowIso : null,
+    last_error_ts: errorCount > 0 ? nowIso : null,
+  };
 }

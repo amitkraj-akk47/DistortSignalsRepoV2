@@ -1,0 +1,15 @@
+{
+  "timestamp": "2026-01-13T11:09:36.975067+00:00",
+  "migration_info": {
+    "rows_inserted": 4660,
+    "total_in_target": 4660,
+    "migrated_count": 4660,
+    "synthetic_count": 0
+  },
+  "source_breakdown": [
+    {
+      "source": "migrated_from_derived",
+      "count": 4660
+    }
+  ]
+}
