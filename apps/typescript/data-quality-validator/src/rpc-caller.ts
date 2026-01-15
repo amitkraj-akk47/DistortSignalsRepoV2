@@ -33,41 +33,21 @@ export interface RPCExecutionContext {
 }
 
 /**
- * Initialize Supabase client using Hyperdrive connection
+ * Initialize Supabase client
+ * Uses environment secrets for connection
  */
 export async function initHyperdrive(
   env: any
 ): Promise<any> {
-  const hyperdrive = env.HYPERDRIVE;
-
-  if (!hyperdrive) {
-    throw new Error(
-      'HYPERDRIVE binding not configured. Check wrangler.toml'
-    );
-  }
-
-  // Create Supabase client using Hyperdrive's connection string
-  // Hyperdrive provides connectionString property
-  const connectionString = hyperdrive.connectionString;
-  
-  // Extract host from connection string to build Supabase URL
-  // Format: postgres://user:pass@host:port/db
-  const match = connectionString.match(/postgres:\/\/[^@]+@([^:]+)/);
-  const host = match ? match[1] : null;
-  
-  if (!host) {
-    throw new Error('Could not extract host from Hyperdrive connection string');
-  }
-
-  // Build Supabase REST API URL from pooler host
-  // Convert: xyz.pooler.supabase.com -> https://xyz.supabase.co
-  const supabaseUrl = `https://${host.replace('.pooler.supabase.com', '.supabase.co')}`;
-  
-  // Use service role key from environment
+  const supabaseUrl = env.SUPABASE_URL;
   const serviceRoleKey = env.SUPABASE_SERVICE_ROLE_KEY;
-  
+
+  if (!supabaseUrl) {
+    throw new Error('SUPABASE_URL not configured as worker secret');
+  }
+
   if (!serviceRoleKey) {
-    throw new Error('SUPABASE_SERVICE_ROLE_KEY not configured');
+    throw new Error('SUPABASE_SERVICE_ROLE_KEY not configured as worker secret');
   }
 
   return createClient(supabaseUrl, serviceRoleKey, {
