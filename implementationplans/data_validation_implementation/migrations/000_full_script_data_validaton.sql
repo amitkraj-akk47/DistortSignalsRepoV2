@@ -1560,7 +1560,7 @@ begin
   v_checks := v_checks || jsonb_build_array(v_check);
   v_checks_run := v_checks_run + 1;
 
-  insert into public.quality_check_results
+  insert into public.quality_check_results (run_id, mode, check_category, status, execution_time_ms, issue_count, result_summary, issue_details)
   select
     v_run_id,
     v_mode,
@@ -1600,7 +1600,7 @@ begin
   v_checks := v_checks || jsonb_build_array(v_check);
   v_checks_run := v_checks_run + 1;
 
-  insert into public.quality_check_results
+  insert into public.quality_check_results (run_id, mode, check_category, status, execution_time_ms, issue_count, result_summary, issue_details)
   select
     v_run_id,
     v_mode,
@@ -1637,7 +1637,7 @@ begin
   v_checks := v_checks || jsonb_build_array(v_check);
   v_checks_run := v_checks_run + 1;
 
-  insert into public.quality_check_results
+  insert into public.quality_check_results (run_id, mode, check_category, status, execution_time_ms, issue_count, result_summary, issue_details)
   select
     v_run_id,
     v_mode,
@@ -1672,7 +1672,7 @@ begin
   v_checks := v_checks || jsonb_build_array(v_check);
   v_checks_run := v_checks_run + 1;
 
-  insert into public.quality_check_results
+  insert into public.quality_check_results (run_id, mode, check_category, status, execution_time_ms, issue_count, result_summary, issue_details)
   select
     v_run_id,
     v_mode,
@@ -1709,7 +1709,7 @@ begin
     v_checks := v_checks || jsonb_build_array(v_check);
     v_checks_run := v_checks_run + 1;
 
-    insert into public.quality_check_results
+    insert into public.quality_check_results (run_id, mode, check_category, status, execution_time_ms, issue_count, result_summary, issue_details)
     select
       v_run_id,
       v_mode,
