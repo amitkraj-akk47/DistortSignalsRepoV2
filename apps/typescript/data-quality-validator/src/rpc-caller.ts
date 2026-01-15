@@ -117,7 +117,9 @@ export async function executeRPC(
       
       const { data, error } = await Promise.race([
         client.rpc(rpcName, rpcParams),
-        new Promise((_, reject) =>\n          setTimeout(\n            () => reject(new Error(`RPC timeout after ${timeoutMs}ms`)),
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`RPC timeout after ${timeoutMs}ms`)),
             timeoutMs
           )
         ) as Promise<{ data: any; error: any }>,

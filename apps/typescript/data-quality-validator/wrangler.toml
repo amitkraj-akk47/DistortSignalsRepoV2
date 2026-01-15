@@ -2,6 +2,10 @@ name = "data-quality-validator"
 main = "src/index.ts"
 compatibility_date = "2024-12-16"
 
+# Build configuration
+[build]
+command = "npm run build"
+
 # Development environment only (production deployment is manual)
 [env.development]
 name = "data-quality-validator-development"
@@ -11,6 +15,3 @@ triggers = { crons = ["*/5 * * * *"] }
 [[env.development.hyperdrive]]
 id = "129ab6040deb44388d29cffeebc0fa66"
 binding = "HYPERDRIVE"
-
-# Build configuration
-build = { command = "npm run build" }
