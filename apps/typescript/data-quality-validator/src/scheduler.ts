@@ -2,8 +2,8 @@
  * Scheduler - Data Quality Validation Worker
  * 
  * Executes rpc_run_health_checks orchestrator RPC
- * Single cron: */5 * * * * (every 5 minutes)
- * Mode determined by minute: :00 and :30 = full mode, others = fast mode
+ * Single cron: every 5 minutes
+ * Mode determined by minute: at 00 and 30 = full mode, others = fast mode
  */
 
 import { executeRPC } from './rpc-caller';
