@@ -2,33 +2,15 @@ name = "data-quality-validator"
 main = "src/index.ts"
 compatibility_date = "2024-12-16"
 
-# Development environment
+# Development environment only (production deployment is manual)
 [env.development]
 name = "data-quality-validator-development"
 vars = { ENVIRONMENT = "development" }
 triggers = { crons = ["*/5 * * * *"] }
 
 [[env.development.hyperdrive]]
-id = "dsdevdbhyperdrive"
-binding = "HYPERDRIVE"
-
-# Production environment
-[env.production]
-name = "data-quality-validator-production"
-vars = { ENVIRONMENT = "production" }
-triggers = { crons = ["*/5 * * * *"] }
-
-[[env.production.hyperdrive]]
-id = "dsdevdbhyperdrive"
+id = "129ab6040deb44388d29cffeebc0fa66"
 binding = "HYPERDRIVE"
 
 # Build configuration
 build = { command = "npm run build" }
-
-# Local development
-[local_protocol]
-https = false
-
-# Observability (optional, for production)
-[observability]
-enabled = false

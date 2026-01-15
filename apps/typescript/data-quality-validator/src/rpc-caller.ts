@@ -1,6 +1,6 @@
 /**
  * RPC Caller Utility
- * Handles database connection pooling via Hyperdrive and RPC invocation
+ * Handles database connection via Hyperdrive and RPC invocation
  * Implements retry logic and performance monitoring
  */
 
@@ -32,24 +32,20 @@ export interface RPCExecutionContext {
 
 /**
  * Initialize database connection via Hyperdrive
- * MANDATORY: Direct Postgres connection (not REST API)
  */
 export async function initHyperdrive(
   env: any
 ): Promise<any> {
-  // Hyperdrive binding will be injected by Wrangler
-  // This returns a Postgres client connected through Hyperdrive's connection pool
   const hyperdrive = env.HYPERDRIVE;
-  
+
   if (!hyperdrive) {
     throw new Error(
-      'HYPERDRIVE binding not configured. Check wrangler.toml and environment variables.'
+      'HYPERDRIVE binding not configured. Check wrangler.toml'
     );
   }
-  
+
   return hyperdrive;
 }
-
 /**
  * Execute a single RPC with retry logic and timeout
  */
