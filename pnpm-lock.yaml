@@ -53,6 +53,18 @@ importers:
         specifier: ^3.22.0
         version: 3.114.16(@cloudflare/workers-types@4.20260108.0)
 
+  apps/typescript/data-quality-validator:
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^4.20240916.0
+        version: 4.20260108.0
+      typescript:
+        specifier: ^5.3.0
+        version: 5.9.3
+      wrangler:
+        specifier: ^3.28.0
+        version: 3.114.16(@cloudflare/workers-types@4.20260108.0)
+
   apps/typescript/director-endpoints:
     dependencies:
       '@distortsignals/ts-contracts':
